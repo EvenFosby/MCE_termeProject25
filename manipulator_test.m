@@ -5,6 +5,14 @@
 %       0 0 0,          1 ]
 % where a=q1, b=q2 (revolute), c=q3 (prismatic), d=constant offset.
 
+% Example pose (radians, meters)
+a = deg2rad(50);   % q1
+b = deg2rad(20);  % q2
+c = 0.25;   % q3 (prismatic extension)
+d = 3.5;   % constant offset
+
+manipulator_plot(a,b,c,d);
+
 function manipulator_plot(a, b, c, d)
     if nargin < 4, d = 0.2; end   % default constant offset (meters)
     if nargin < 3, error('Usage: manipulator_plot(a,b,c,dOptional)'); end
