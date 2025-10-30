@@ -1,6 +1,6 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% This functino computes the motion of a supply vessel with a closed-loop 
-% DP controller. 
+% This function computes the motion of a supply vessel with a closed-loop 
+% DP controller using equivalent added mass and damping matrices.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 clear; close all; clc;
@@ -19,8 +19,6 @@ x       = [eta_0; nu_0];
 % Vessel mass 
 m = vessel.main.m;
 MRB = vessel.MRB; % Rigid body mass
-MA = vessel.A(:,:,1); % Added mass
-M = MRB + MA; % System inertia matrix
 
 % Hydrostatics
 rho = 1025; g = 9.81;
@@ -29,44 +27,12 @@ GM_T = vessel.main.GM_T;
 GM_L = vessel.main.GM_L;
 
 % Linear restoring matrix
-G = diag([M(1,1)*0.05^2, ...
-          M(2,2)*0.05^2, ...
+G = diag([MRB(1,1)*0.05^2, ...
+          MRB(2,2)*0.05^2, ...
           rho*g*Awp, ...
           m*g*GM_T, ...
           m*g*GM_L, ...
-          M(6,6)*0.05^2]);
-
-% Linear damping
-zeta = [1 1 0.20 0.03 0.05 1];
-D = diag([2*zeta(1)*sqrt(M(1,1)*G(1,1)), ...
-          2*zeta(2)*sqrt(M(2,2)*G(2,2)), ...
-          2*zeta(3)*sqrt(M(3,3)*G(3,3)), ...
-          2*zeta(4)*sqrt(M(4,4)*G(4,4)), ...
-          2*zeta(5)*sqrt(M(5,5)*G(5,5)), ...
-          2*zeta(6)*sqrt(M(6,6)*G(6,6))]);
-
-% Kinematic mapping
-J6 = @(eta) eulerang(eta(4), eta(5), eta(6));
-
-% Continuous-time state derivatives:
-% eta_dot = J(eta)*nu
-% nu_dot  = -M\G * eta - M\D * nu + M\tau
-Minv = M \ eye(6);
-ship_dynamics = @(x, tau) [J6(x(1:6)) * x(7:12); 
-                                 -Minv*(D*x(7:12) + G*x(1:6)) + Minv*tau]; 
-
-% DP controller
-eta_ref = zeros(6,1);
-S = diag([1 1 0 0 0 1]);
-alpha_p = 1.0; alpha_d = 1.0;         % gain scalars (tweakable)
-Kp = alpha_p * G;
-Kd = alpha_d * D;
-
-use_integral = false; 
-Ki = 0.02 * diag(diag(G));
-eta_int = zeros(6,1);
-
-tau_dp = @(eta, nu) S*(-Kp*(eta - eta_ref) - Kd*nu - (use_integral*Ki*eta_int));
+          MRB(6,6)*0.05^2]);
 
 %% Sea state and wave spectrum 
 % Sea state
@@ -86,7 +52,7 @@ numDirections = 24;             % Number of wave directions (>15)
 
 spreadingFlag = true;
 
-% Reshape vessel data o use 0 to maxFreq
+% Reshape vessel data to use 0 to maxFreq
 if vessel.forceRAO.w(end) > maxFreq
     w_index = find(vessel.forceRAO.w > maxFreq, 1) - 1;
     vessel.forceRAO.w = vessel.forceRAO.w(1:w_index); % frequency vector
@@ -101,6 +67,74 @@ omegaMax = vessel.forceRAO.w(end);
 [S_M, omega, Amp, ~, ~, mu] = waveDirectionalSpectrum('JONSWAP', ...
     spectrumParam, numFreqIntervals, omegaMax, spreadingFlag, numDirections);
 
+%% Compute A_eq and B_eq using computeManeuveringModel
+U_ship = 5;  % Ship forward speed (m/s)
+
+% Compute encounter frequency (approximate shift for following/head seas)
+omega_p = w0 - (w0^2 / g) * U_ship * cos(beta);
+
+% Compute equivalent added mass and damping matrices
+plotFlag = 0;  % Set to 1 to see plots of A(ω) and B(ω)
+vessel = computeManeuveringModel(vessel, omega_p, plotFlag);
+
+% Extract the diagonal elements of A_eq and B_eq for the first velocity
+MA = diag([vessel.A_eq(1,1,1,1), ...
+           vessel.A_eq(2,2,1,1), ...
+           vessel.A_eq(3,3,1,1), ...
+           vessel.A_eq(4,4,1,1), ...
+           vessel.A_eq(5,5,1,1), ...
+           vessel.A_eq(6,6,1,1)]);
+
+D = diag([vessel.B_eq(1,1,1,1), ...
+          vessel.B_eq(2,2,1,1), ...
+          vessel.B_eq(3,3,1,1), ...
+          vessel.B_eq(4,4,1,1), ...
+          vessel.B_eq(5,5,1,1), ...
+          vessel.B_eq(6,6,1,1)]);
+
+% System inertia matrix
+M = MRB + MA;
+
+% Linear damping with additional tuning
+zeta = [1 1 0.20 0.03 0.05 1];
+D_tuned = diag([2*zeta(1)*sqrt(M(1,1)*G(1,1)), ...
+                2*zeta(2)*sqrt(M(2,2)*G(2,2)), ...
+                2*zeta(3)*sqrt(M(3,3)*G(3,3)), ...
+                2*zeta(4)*sqrt(M(4,4)*G(4,4)), ...
+                2*zeta(5)*sqrt(M(5,5)*G(5,5)), ...
+                2*zeta(6)*sqrt(M(6,6)*G(6,6))]);
+
+% Use the spectrum-weighted damping D, but can also blend with tuned damping if needed
+% Option 1: Use only B_eq from computeManeuveringModel
+% D_final = D;
+
+% Option 2: Blend with zeta-tuned damping (recommended for better control performance)
+alpha_blend = 0.5;  % Blending factor: 0 = all B_eq, 1 = all D_tuned
+D_final = (1 - alpha_blend) * D + alpha_blend * D_tuned;
+
+% Kinematic mapping
+J6 = @(eta) eulerang(eta(4), eta(5), eta(6));
+
+% Continuous-time state derivatives:
+% eta_dot = J(eta)*nu
+% nu_dot  = -M\G * eta - M\D * nu + M\tau
+Minv = M \ eye(6);
+ship_dynamics = @(x, tau) [J6(x(1:6)) * x(7:12); 
+                           -Minv*(D_final*x(7:12) + G*x(1:6)) + Minv*tau]; 
+
+% DP controller
+eta_ref = zeros(6,1);
+S = diag([1 1 0 0 0 1]);
+alpha_p = 1.0; alpha_d = 1.0;         % gain scalars (tweakable)
+Kp = alpha_p * G;
+Kd = alpha_d * D_final;
+
+use_integral = false; 
+Ki = 0.02 * diag(diag(G));
+eta_int = zeros(6,1);
+
+tau_dp = @(eta, nu) S*(-Kp*(eta - eta_ref) - Kd*nu - (use_integral*Ki*eta_int));
+
 %% Ship motion simulation
 dt = 0.1;
 T_final = 200;
@@ -109,14 +143,12 @@ T_initTransient = 20;
 t = (0:dt:T_final+T_initTransient-1);
 N = numel(t);
 
-U_ship = 5;
-
-% Low pass filterting psi
+% Low pass filtering psi
 Tpsi = 12;
 alpha = 1 - exp(-dt/Tpsi);
 psi_lp = 0;
 
-% Simualtion state log
+% Simulation state log
 x_log           = zeros(N, 12);
 tau_log         = zeros(N, 6);
 eta_wf_log      = zeros(N, 6);
@@ -185,6 +217,25 @@ nu_wf_log   = nu_wf_log(startIndex:end,:);
 zeta_log    = zeta_log(startIndex:end);
 tau_log     = tau_log(startIndex:end,:);
 psi_lp_log  = psi_lp_log(startIndex:end,:);
+
+%% Display equivalent matrices
+fprintf('\n========================================\n');
+fprintf('Equivalent Added Mass Matrix (MA diagonal):\n');
+fprintf('A_eq(1,1) = %.2e kg (surge)\n', MA(1,1));
+fprintf('A_eq(2,2) = %.2e kg (sway)\n', MA(2,2));
+fprintf('A_eq(3,3) = %.2e kg (heave)\n', MA(3,3));
+fprintf('A_eq(4,4) = %.2e kg·m² (roll)\n', MA(4,4));
+fprintf('A_eq(5,5) = %.2e kg·m² (pitch)\n', MA(5,5));
+fprintf('A_eq(6,6) = %.2e kg·m² (yaw)\n', MA(6,6));
+
+fprintf('\nEquivalent Damping Matrix (D diagonal):\n');
+fprintf('B_eq(1,1) = %.2e N·s/m (surge)\n', D(1,1));
+fprintf('B_eq(2,2) = %.2e N·s/m (sway)\n', D(2,2));
+fprintf('B_eq(3,3) = %.2e N·s/m (heave)\n', D(3,3));
+fprintf('B_eq(4,4) = %.2e N·m·s/rad (roll)\n', D(4,4));
+fprintf('B_eq(5,5) = %.2e N·m·s/rad (pitch)\n', D(5,5));
+fprintf('B_eq(6,6) = %.2e N·m·s/rad (yaw)\n', D(6,6));
+fprintf('========================================\n\n');
 
 %% Plots
 figure(1); clf;
