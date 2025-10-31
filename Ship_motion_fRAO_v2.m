@@ -1,0 +1,361 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% This function computes the motion of a supply vessel under closed-loop 
+% DP-control
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+clear; close all; clc;
+
+rng(1);
+
+% Load vessel
+load supply;
+
+% Simulation Flags
+spreadingFlag = true;
+plotFlag = false;
+forceRaoFlag = false;
+useIntegralAction = false;
+
+% Simulation parameters
+h = 0.1;
+T_final = 200;
+T_initTransient = 20;
+
+t = 0:h:T_final+T_initTransient-1;
+N = numel(t);
+
+% Control objectiv
+psi = 0;
+U = 0;
+
+%% Sea state and wave spectrum
+Hs = 2.5;
+Tz = 6;
+
+T0 = Tz / 0.710;
+w0 = 2*pi / T0;
+
+gamma = 3.3;
+beta = deg2rad(140);
+
+spectrumType = 'JONSWAP';
+spectrumParam = [Hs, w0, gamma];
+
+maxFreq = 3.0;
+numFreqIntervals = 60;
+numDirections = 24;
+
+% Reshape vessel data o use 0 to maxFreq
+if vessel.forceRAO.w(end) > maxFreq
+    w_index = find(vessel.forceRAO.w > maxFreq, 1) - 1;
+    vessel.forceRAO.w = vessel.forceRAO.w(1:w_index); % frequency vector
+    for DOF = 1:length(vessel.forceRAO.amp)
+        vessel.forceRAO.amp{DOF} = vessel.forceRAO.amp{DOF}(1:w_index, :, :);
+        vessel.forceRAO.phase{DOF} = vessel.forceRAO.phase{DOF}(1:w_index, :, :);
+    end
+end
+
+omegaMax = vessel.forceRAO.w(end);
+
+[S_M, Omega, Amp, ~, ~, mu] = waveDirectionalSpectrum(spectrumType, ...
+    spectrumParam, numFreqIntervals, omegaMax, spreadingFlag, numDirections);
+
+%% Vessel model
+MRB = vessel.MRB;
+
+% Compute A_eq and B_eq
+g = 9.81;
+omega_p = w0 - (w0^2 / g) * U * cos(beta); % Shifted encounter frequency
+vessel = computeManeuveringModel(vessel, omega_p, plotFlag);
+
+% Extract the diagonal elements of A_eq and B_eq for the first velocity
+MA = diag([vessel.A_eq(1,1,1,1), ...
+           vessel.A_eq(2,2,1,1), ...
+           vessel.A_eq(3,3,1,1), ...
+           vessel.A_eq(4,4,1,1), ...
+           vessel.A_eq(5,5,1,1), ...
+           vessel.A_eq(6,6,1,1)]);
+
+M = MRB + MA;
+Minv = M \ eye(6);
+
+D = diag([vessel.B_eq(1,1,1,1), ...
+          vessel.B_eq(2,2,1,1), ...
+          vessel.B_eq(3,3,1,1), ...
+          vessel.B_eq(4,4,1,1), ...
+          vessel.B_eq(5,5,1,1), ...
+          vessel.B_eq(6,6,1,1)]);
+
+% Linear restroing matrix
+m = vessel.main.m; % Vessel mass
+rho = 1025; g = 9.81; 
+Awp = vessel.main.Lwl * vessel.main.B * 0.8; % Waterplane displacement
+GM_T = vessel.main.GM_T;
+GM_L = vessel.main.GM_L;
+
+R33 = rho*g*Awp; 
+R44 = m*g*GM_T; 
+R55 = m * g * GM_L; % Calculate the restoring force for the roll motion
+
+G = diag([0, 0, R33, R44, R55, 0]);
+
+% Kinematic mapping
+J = @(eta) eulerang(eta(4), eta(5), eta(6));
+
+% Continuous-time state derivatives:
+% eta_dot = J(eta)*nu
+% nu_dot  = -M\G * eta - M\D * nu + M\tau
+
+ship_dynamics = @(x, tau) [J(x(1:6)) * x(7:12); 
+                           -Minv*(D*x(7:12) + G*x(1:6)) + Minv*tau]; 
+
+%% DP controller 
+S = diag([1 1 1 0 0 0 1]);
+
+Kp = diag([1 1 0 0 0 1]);
+Ki = diag([1 1 0 0 0 1]);
+Kd = diag([1 1 0 0 0 1]);
+
+tau_pid = @(eta, nu, eta_int) S*(eulerang(eta(4), eta(5), eta(6))'*(-Kp*eta ...
+    - Kd*eulerang(eta(4), eta(5), eta(6))*nu - (useIntegralAction*Ki*eta_int)));
+
+% Heading lowpass filter
+T_psi = 12;
+alpha = h/(T_psi + h);
+psi_lp = zeros(6,1);
+
+%% Main loop
+% Initial vessel states
+eta_0   = [0 0 0 0 0 0]';       % eta = [x y z phi theta psi]
+nu_0    = [0 0 0 0 0 0]';       % nu = [u v w p q r]
+x       = [eta_0; nu_0];
+
+eta_int = [0 0 0 0 0 0]';
+
+% desired vessel states
+eta_d   = [0 0 0 0 0 0]';
+nu_d    = [0 0 0 0 0 0]';
+x_d     = [eta_0; nu_0];
+
+% Preallocate data log
+x_log           = zeros(N, 12);
+tau_log         = zeros(N, 6);
+zeta_log        = zeros(N, 1);    % wave elevation
+y_eta_log       = zeros(N, 6);    % measured total position/orientation
+y_nu_log        = zeros(N, 6);    % measured total velocities
+y_nudot_log     = zeros(N, 6);    % measured total accelerations (WF only + LF approx)
+psi_lp_log      = zeros(N,1);
+
+simdata_fRAO = zeros(N, 7);
+simdata_mRAO = zeros(N, 19);
+
+for k = 1:N
+    tk = t(k);
+    eta = x(1:6);
+    nu = x(7:12);
+
+    % Lowpass filtering heading
+    psi_err = eta(6) - psi_lp;
+    psi_lp = psi_lp + alpha*psi_err;
+    psi_lp = ssa(psi_lp);
+    
+    % Add DP control on LF states
+    tau_pid = tau_pid(eta, nu, eta_int);
+
+    if use_integral
+        e_eta = eta_ref - eta;
+        eta_int = eta_int + dt * (S * e_eta);
+    end
+
+    if forceRaoFlag
+        % Force RAO
+        [tau_wave, zeta_fWave] = waveForceRAO(tk, S_M, Amp, Omega, mu, ...
+        vessel, U, psi, beta, numFreqIntervals);
+        simdata_fRAO(k, :) = [tau_wave', zeta_fWave']; % Log force data
+    else
+        % Motion RAO
+        [eta_wf, nu_wf, nudot_wf, zeta_mWave] = waveMotionRAO_v1(tk, ...
+            S_M, Amp, Omega, mu, vessel, U, psi, beta, numFreqIntervals);
+        simdata_mRAO(k, :) = [eta_wf', nu_wf', nudot_wf', zeta_mWave]; % Log motion data
+        tau_wave = zeros(6,1);
+    end
+   
+    tau = tau_pid + tau_wave;
+
+    % Update states using rk4
+    x = rk4(ship_dynamics, h, x, tau);
+
+    % "Measured" total output = LF + WF (per Fossen 2021)
+    y_eta   = eta + eta_wf;
+    y_nu    = nu  + nu_wf;
+    y_nudot = nudot_wf; % LF accel not kept explicitly here
+
+    % Log
+    x_log(k,:)        = [eta.' nu.'];
+    tau_log(k,:)      = tau.';
+    eta_wf_log(k,:)   = eta_wf.';
+    nu_wf_log(k,:)    = nu_wf.';
+    nudot_wf_log(k,:) = nudot_wf.';
+    zeta_log(k)       = zeta;
+    y_eta_log(k,:)    = y_eta.';
+    y_nu_log(k,:)     = y_nu.';
+    y_nudot_log(k,:)  = y_nudot.';
+
+    psi_lp_log(k,:) = psi_lp;
+    
+end
+
+% After your main loop, ignore transient
+idx0 = max(1, floor(T_initTransient/h) + 1);
+zeta = simdata_mRAO(idx0:end,19);
+
+% 1) Should be ~ Hs/4
+fprintf('std(zeta)=%.3f m  (expected ~ %.3f m)\n', std(zeta), Hs/4);
+
+% 2) Spectrum zeroth moment should match variance
+dOmega = Omega(2)-Omega(1);                % rad/s
+if spreadingFlag
+    dmu = 2*pi/numDirections;              % *** radians ***
+    m0  = sum(S_M(:))*dOmega*dmu;          % m^2
+else
+    m0  = sum(S_M(:,1))*dOmega;            % m^2
+end
+fprintf('m0 from S_M = %.3f m^2,  std(zeta)^2 = %.3f m^2\n', m0, var(zeta));
+
+%% === MOTION RAO PLOTS ===
+figure(101); clf;
+
+% Time-series (discard initial transient)
+startIndex = max(1, floor(T_initTransient / h) + 1);
+tt = t(startIndex:end) - t(startIndex);
+
+% Unpack motion data
+eta_WF    = simdata_mRAO(startIndex:end, 1:6);      % positions
+nu_WF     = simdata_mRAO(startIndex:end, 7:12);     % velocities
+nudot_WF  = simdata_mRAO(startIndex:end, 13:18);    % accelerations
+waveElevM = simdata_mRAO(startIndex:end, 19);       % wave elevation (from motion RAO)
+
+% ---- Wave spectrum ----
+subplot(2,1,1); hold on;
+if spreadingFlag
+    % Show a few representative directions
+    midIdx  = max(1, floor(length(mu)/2));
+    qtrIdx  = max(1, floor(length(mu)/4));
+    endIdx  = length(mu);
+
+    plot(Omega, S_M(:, midIdx), 'LineWidth', 2);
+    plot(Omega, S_M(:, qtrIdx), 'LineWidth', 2);
+    plot(Omega, S_M(:, endIdx), 'LineWidth', 2);
+
+    ylo = min(S_M(:)); yhi = max(S_M(:));
+    plot([w0 w0], [ylo yhi], 'k--', 'LineWidth', 1.5);
+    legend(sprintf('\\mu = %.0f°', rad2deg(mu(midIdx))), ...
+           sprintf('\\mu = %.0f°', rad2deg(mu(qtrIdx))), ...
+           sprintf('\\mu = %.0f°', rad2deg(mu(endIdx))), ...
+           sprintf('\\omega_0 = %.3g rad/s', w0), ...
+           'Location','best');
+else
+    plot(Omega, S_M(:,1), 'LineWidth', 2);
+    ylo = min(S_M(:)); yhi = max(S_M(:));
+    plot([w0 w0], [ylo yhi], 'k--', 'LineWidth', 1.5);
+    legend('S(\Omega)', sprintf('\\omega_0 = %.3g rad/s', w0), 'Location','best');
+end
+xlabel('\Omega (rad/s)'); ylabel('m^2 s');
+title([spectrumType, ' spectrum']); grid on; hold off;
+
+% ---- Wave elevation ----
+subplot(2,1,2);
+plot(tt, waveElevM, 'LineWidth', 2);
+xlabel('Time (s)'); ylabel('m'); grid on;
+title(sprintf('Wave Elevation for \\beta = %.0f° and H_s = %.1f m', rad2deg(beta), Hs));
+
+% ---- Positions (6-DOF) ----
+figure(102); clf;
+DOF_txt = {'x-position (m)', 'y-position (m)', 'z-position (m)', ...
+           'Roll angle (deg)', 'Pitch angle (deg)', 'Yaw angle (deg)'};
+T_scale = [1 1 1 180/pi 180/pi 180/pi];
+for k = 1:6
+    subplot(6,1,k);
+    plot(tt, T_scale(k)*eta_WF(:,k), 'LineWidth', 1.8);
+    grid on; xlabel('Time (s)'); ylabel(DOF_txt{k});
+end
+if exist('sgtitle','file'), sgtitle(sprintf('Wave-frequency positions (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs)); end
+
+% ---- Velocities (6-DOF) ----
+figure(103); clf;
+DOF_txt_v = {'Surge vel (m/s)','Sway vel (m/s)','Heave vel (m/s)', ...
+             'Roll rate (deg/s)','Pitch rate (deg/s)','Yaw rate (deg/s)'};
+for k = 1:6
+    subplot(6,1,k);
+    plot(tt, T_scale(k)*nu_WF(:,k), 'LineWidth', 1.8);
+    grid on; xlabel('Time (s)'); ylabel(DOF_txt_v{k});
+end
+if exist('sgtitle','file'), sgtitle(sprintf('Wave-frequency velocities (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs)); end
+
+% ---- Accelerations (6-DOF) ----
+figure(104); clf;
+DOF_txt_a = {'Surge acc (m/s^2)','Sway acc (m/s^2)','Heave acc (m/s^2)', ...
+             'Roll accel (deg/s^2)','Pitch accel (deg/s^2)','Yaw accel (deg/s^2)'};
+for k = 1:6
+    subplot(6,1,k);
+    plot(tt, T_scale(k)*nudot_WF(:,k), 'LineWidth', 1.8);
+    grid on; xlabel('Time (s)'); ylabel(DOF_txt_a{k});
+end
+if exist('sgtitle','file'), sgtitle(sprintf('Wave-frequency accelerations (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs)); end
+
+%% === FORCE RAO PLOTS ===
+figure(201); clf;
+
+% Time-series (discard initial transient)
+startIndex = max(1, floor(T_initTransient / h) + 1);
+tt = t(startIndex:end) - t(startIndex);
+
+% Unpack force data
+tau_wave  = simdata_fRAO(startIndex:end, 1:6);  % 6 DOF forces/moments
+waveElevF = simdata_fRAO(startIndex:end, 7);    % wave elevation (from force RAO)
+
+% ---- Wave spectrum ----
+subplot(2,1,1); hold on;
+if spreadingFlag
+    midIdx  = max(1, floor(length(mu)/2));
+    qtrIdx  = max(1, floor(length(mu)/4));
+    endIdx  = length(mu);
+
+    plot(Omega, S_M(:, midIdx), 'LineWidth', 2);
+    plot(Omega, S_M(:, qtrIdx), 'LineWidth', 2);
+    plot(Omega, S_M(:, endIdx), 'LineWidth', 2);
+
+    ylo = min(S_M(:)); yhi = max(S_M(:));
+    plot([w0 w0], [ylo yhi], 'k--', 'LineWidth', 1.5);
+    legend(sprintf('\\mu = %.0f°', rad2deg(mu(midIdx))), ...
+           sprintf('\\mu = %.0f°', rad2deg(mu(qtrIdx))), ...
+           sprintf('\\mu = %.0f°', rad2deg(mu(endIdx))), ...
+           sprintf('\\omega_0 = %.3g rad/s', w0), ...
+           'Location','best');
+else
+    plot(Omega, S_M(:,1), 'LineWidth', 2);
+    ylo = min(S_M(:)); yhi = max(S_M(:));
+    plot([w0 w0], [ylo yhi], 'k--', 'LineWidth', 1.5);
+    legend('S(\Omega)', sprintf('\\omega_0 = %.3g rad/s', w0), 'Location','best');
+end
+xlabel('\Omega (rad/s)'); ylabel('m^2 s');
+title([spectrumType, ' spectrum']); grid on; hold off;
+
+% ---- Wave elevation ----
+subplot(2,1,2);
+plot(tt, waveElevF, 'LineWidth', 2);
+xlabel('Time (s)'); ylabel('m'); grid on;
+title(sprintf('Wave Elevation for \\beta = %.0f° and H_s = %.1f m', rad2deg(beta), Hs));
+
+% ---- 6-DOF generalized 1st-order wave forces ----
+figure(202); clf;
+DOF_txt_tau = {'Surge (N)','Sway (N)','Heave (N)','Roll (N·m)','Pitch (N·m)','Yaw (N·m)'};
+for k = 1:6
+    subplot(6,1,k);
+    plot(tt, tau_wave(:,k), 'LineWidth', 1.8);
+    grid on; xlabel('Time (s)'); ylabel(DOF_txt_tau{k});
+end
+if exist('sgtitle','file'), sgtitle(sprintf('Generalized 1st-order Wave Forces (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs)); end
+
+
+
