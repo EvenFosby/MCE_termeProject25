@@ -18,8 +18,8 @@ useIntegralAction = false;
 
 % Simulation parameters
 h = 0.1;
-T_final = 200;
-T_initTransient = 20;
+T_final = 300;
+T_initTransient = 0;
 
 t = 0:h:T_final+T_initTransient-1;
 N = numel(t);
@@ -110,19 +110,42 @@ ship_dynamics = @(x, tau) [J(x(1:6)) * x(7:12);
                            -Minv*(D*x(7:12) + G*x(1:6)) + Minv*tau]; 
 
 %% DP controller 
-S = diag([1 1 1 0 0 0 1]);
+S = [1 1 0 0 0 1]';
 
-Kp = diag([1 1 0 0 0 1]);
-Ki = diag([1 1 0 0 0 1]);
-Kd = diag([1 1 0 0 0 1]);
+% Kp = diag([1 1 0 0 0 1]);
+% Ki = diag([1 1 0 0 0 1]);
+% Kd = diag([1 1 0 0 0 1]);
 
-tau_pid = @(eta, nu, eta_int) S*(eulerang(eta(4), eta(5), eta(6))'*(-Kp*eta ...
+% Computing PID-gains using Algorithem 15.2 from (Fossen, 2021)
+omega_b1 = 0.05; omega_b2 = 0.05; omega_b6 = 0.03;
+omega_b = [omega_b1, omega_b2, 0, 0, 0, omega_b6];
+Omega_b = diag(omega_b);
+
+zeta_pid1 = 0.80; zeta_pid2 = 0.80; zeta_pid6 = 1;
+zeta_pid = [zeta_pid1, zeta_pid2, 0, 0, 0, zeta_pid6];
+Zeta_pid = diag(zeta_pid);
+
+omega_n = zeros(1,6);
+for i = 1:length(omega_n)
+    omega_n(i) = omega_b(i) / ( sqrt(1 - 2*zeta_pid(i)^2 + sqrt(4*zeta_pid(i)^4 - 4*zeta_pid(i)^2 + 2) ) );
+end
+Omega_n = diag(omega_n);
+
+% Assuming roll, pitch and yaw is small => J_Theta(eta) = I
+Kp = M*Omega_n^2;
+
+Kd = 2.*M*Zeta_pid*Omega_n; % - D; 
+
+Ki = 0.10*Kp*Omega_n;
+
+% PID controller
+tau_pid = @(eta, nu, eta_int) S.*(eulerang(eta(4), eta(5), eta(6))'*(-Kp*eta ...
     - Kd*eulerang(eta(4), eta(5), eta(6))*nu - (useIntegralAction*Ki*eta_int)));
 
 % Heading lowpass filter
 T_psi = 12;
 alpha = h/(T_psi + h);
-psi_lp = zeros(6,1);
+psi_lp = 0;
 
 %% Main loop
 % Initial vessel states
@@ -140,6 +163,10 @@ x_d     = [eta_0; nu_0];
 % Preallocate data log
 x_log           = zeros(N, 12);
 tau_log         = zeros(N, 6);
+tau_ctrl_log    = zeros(N, 6);
+eta_wf_log      = zeros(N,6);
+nu_wf_log       = zeros(N, 6);
+nudot_wf_log    = zeros(N, 6);
 zeta_log        = zeros(N, 1);    % wave elevation
 y_eta_log       = zeros(N, 6);    % measured total position/orientation
 y_nu_log        = zeros(N, 6);    % measured total velocities
@@ -160,27 +187,32 @@ for k = 1:N
     psi_lp = ssa(psi_lp);
     
     % Add DP control on LF states
-    tau_pid = tau_pid(eta, nu, eta_int);
+    tau_control = tau_pid(eta, nu, eta_int);
 
-    if use_integral
-        e_eta = eta_ref - eta;
-        eta_int = eta_int + dt * (S * e_eta);
+    if useIntegralAction
+        e_eta = eta_d - eta;
+        eta_int = eta_int + h * (S .* e_eta);
     end
 
     if forceRaoFlag
         % Force RAO
-        [tau_wave, zeta_fWave] = waveForceRAO(tk, S_M, Amp, Omega, mu, ...
+        [tau_wave, zeta_wave] = waveForceRAO_v1(tk, S_M, Amp, Omega, mu, ...
         vessel, U, psi, beta, numFreqIntervals);
-        simdata_fRAO(k, :) = [tau_wave', zeta_fWave']; % Log force data
+        simdata_fRAO(k, :) = [tau_wave', zeta_wave']; % Log force data
+
+        eta_wf = zeros(6,1);
+        nu_wf = zeros(6,1);
+        nudot_wf = zeros(6,1);
     else
         % Motion RAO
-        [eta_wf, nu_wf, nudot_wf, zeta_mWave] = waveMotionRAO_v1(tk, ...
+        [eta_wf, nu_wf, nudot_wf, zeta_wave] = waveMotionRAO_v1(tk, ...
             S_M, Amp, Omega, mu, vessel, U, psi, beta, numFreqIntervals);
-        simdata_mRAO(k, :) = [eta_wf', nu_wf', nudot_wf', zeta_mWave]; % Log motion data
+        simdata_mRAO(k, :) = [eta_wf', nu_wf', nudot_wf', zeta_wave]; % Log motion data
+        
         tau_wave = zeros(6,1);
     end
-   
-    tau = tau_pid + tau_wave;
+    
+    tau = tau_control + tau_wave;
 
     % Update states using rk4
     x = rk4(ship_dynamics, h, x, tau);
@@ -190,18 +222,18 @@ for k = 1:N
     y_nu    = nu  + nu_wf;
     y_nudot = nudot_wf; % LF accel not kept explicitly here
 
-    % Log
+    % Log everything
     x_log(k,:)        = [eta.' nu.'];
     tau_log(k,:)      = tau.';
+    tau_ctrl_log(k,:) = tau_control.';
     eta_wf_log(k,:)   = eta_wf.';
     nu_wf_log(k,:)    = nu_wf.';
     nudot_wf_log(k,:) = nudot_wf.';
-    zeta_log(k)       = zeta;
+    zeta_log(k)       = zeta_wave;
     y_eta_log(k,:)    = y_eta.';
     y_nu_log(k,:)     = y_nu.';
     y_nudot_log(k,:)  = y_nudot.';
-
-    psi_lp_log(k,:) = psi_lp;
+    psi_lp_log(k,:)   = psi_lp;
     
 end
 
@@ -357,5 +389,138 @@ for k = 1:6
 end
 if exist('sgtitle','file'), sgtitle(sprintf('Generalized 1st-order Wave Forces (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs)); end
 
+%% === SHIP MOTION (Low-Frequency) PLOTS ===
+figure(301); clf;
 
+% Time-series (discard initial transient)
+startIndex = max(1, floor(T_initTransient / h) + 1);
+tt = t(startIndex:end) - t(startIndex);
+
+% Extract LF motion from x_log
+eta_LF = x_log(startIndex:end, 1:6);      % Low-frequency positions
+nu_LF  = x_log(startIndex:end, 7:12);     % Low-frequency velocities
+
+% ---- LF Positions (6-DOF) ----
+DOF_txt = {'x-position (m)', 'y-position (m)', 'z-position (m)', ...
+           'Roll angle (deg)', 'Pitch angle (deg)', 'Yaw angle (deg)'};
+T_scale = [1 1 1 180/pi 180/pi 180/pi];
+
+for k = 1:6
+    subplot(6,1,k);
+    plot(tt, T_scale(k)*eta_LF(:,k), 'LineWidth', 1.8, 'Color', [0 0.4470 0.7410]);
+    grid on; xlabel('Time (s)'); ylabel(DOF_txt{k});
+end
+if exist('sgtitle','file')
+    sgtitle(sprintf('Low-Frequency Ship Motion (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs));
+end
+
+% ---- LF Velocities (6-DOF) ----
+figure(302); clf;
+DOF_txt_v = {'Surge vel (m/s)','Sway vel (m/s)','Heave vel (m/s)', ...
+             'Roll rate (deg/s)','Pitch rate (deg/s)','Yaw rate (deg/s)'};
+for k = 1:6
+    subplot(6,1,k);
+    plot(tt, T_scale(k)*nu_LF(:,k), 'LineWidth', 1.8, 'Color', [0 0.4470 0.7410]);
+    grid on; xlabel('Time (s)'); ylabel(DOF_txt_v{k});
+end
+if exist('sgtitle','file')
+    sgtitle(sprintf('Low-Frequency Ship Velocities (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs));
+end
+
+%% === CONTROL EFFORT PLOTS ===
+figure(303); clf;
+
+% Extract control forces/moments from tau_log
+tau_ctrl = tau_ctrl_log(startIndex:end, :);
+
+% ---- Control forces and moments ----
+DOF_txt_tau = {'Surge Force (N)','Sway Force (N)','Heave Force (N)', ...
+               'Roll Moment (N·m)','Pitch Moment (N·m)','Yaw Moment (N·m)'};
+
+for k = 1:6
+    subplot(6,1,k);
+    plot(tt, tau_ctrl(:,k), 'LineWidth', 1.8, 'Color', [0.8500 0.3250 0.0980]);
+    grid on; xlabel('Time (s)'); ylabel(DOF_txt_tau{k});
+end
+if exist('sgtitle','file')
+    sgtitle(sprintf('DP Control Effort (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs));
+end
+
+%% === XY POSITION PLOT ===
+figure(304); clf;
+plot(eta_LF(:,1), eta_LF(:,2), 'LineWidth', 2, 'Color', [0 0.4470 0.7410]);
+hold on;
+plot(eta_LF(1,1), eta_LF(1,2), 'go', 'MarkerSize', 10, 'MarkerFaceColor', 'g', 'LineWidth', 2);
+plot(eta_LF(end,1), eta_LF(end,2), 'rs', 'MarkerSize', 10, 'MarkerFaceColor', 'r', 'LineWidth', 2);
+plot(0, 0, 'kx', 'MarkerSize', 15, 'LineWidth', 3);
+grid on; axis equal;
+xlabel('X Position (m)'); ylabel('Y Position (m)');
+legend('Vessel Trajectory', 'Start', 'End', 'Setpoint', 'Location', 'best');
+title(sprintf('Vessel XY Position (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs));
+
+%% === CONTROL EFFORT STATISTICS ===
+figure(305); clf;
+
+% Calculate RMS values for each DOF
+tau_rms = sqrt(mean(tau_ctrl.^2, 1));
+tau_max = max(abs(tau_ctrl), [], 1);
+tau_mean = mean(abs(tau_ctrl), 1);
+
+subplot(3,1,1);
+bar(tau_rms);
+set(gca, 'XTickLabel', {'Surge','Sway','Heave','Roll','Pitch','Yaw'});
+ylabel('RMS'); title('RMS Control Effort'); grid on;
+
+subplot(3,1,2);
+bar(tau_max);
+set(gca, 'XTickLabel', {'Surge','Sway','Heave','Roll','Pitch','Yaw'});
+ylabel('Max Magnitude'); title('Maximum Control Effort'); grid on;
+
+subplot(3,1,3);
+bar(tau_mean);
+set(gca, 'XTickLabel', {'Surge','Sway','Heave','Roll','Pitch','Yaw'});
+ylabel('Mean Magnitude'); title('Mean Absolute Control Effort'); grid on;
+
+if exist('sgtitle','file')
+    sgtitle('Control Effort Statistics');
+end
+
+%% === POSITION ERROR STATISTICS ===
+figure(306); clf;
+
+% Calculate position errors (assuming setpoint is at origin)
+pos_error = eta_LF;  % Since eta_d = [0 0 0 0 0 0]
+pos_error(:,4:6) = pos_error(:,4:6) * 180/pi;  % Convert angles to degrees
+
+pos_rms = sqrt(mean(pos_error.^2, 1));
+pos_max = max(abs(pos_error), [], 1);
+pos_mean = mean(abs(pos_error), 1);
+
+subplot(3,1,1);
+bar(pos_rms);
+set(gca, 'XTickLabel', {'X (m)','Y (m)','Z (m)','Roll (°)','Pitch (°)','Yaw (°)'});
+ylabel('RMS'); title('RMS Position Error'); grid on;
+
+subplot(3,1,2);
+bar(pos_max);
+set(gca, 'XTickLabel', {'X (m)','Y (m)','Z (m)','Roll (°)','Pitch (°)','Yaw (°)'});
+ylabel('Max'); title('Maximum Position Error'); grid on;
+
+subplot(3,1,3);
+bar(pos_mean);
+set(gca, 'XTickLabel', {'X (m)','Y (m)','Z (m)','Roll (°)','Pitch (°)','Yaw (°)'});
+ylabel('Mean'); title('Mean Absolute Position Error'); grid on;
+
+if exist('sgtitle','file')
+    sgtitle('Position Error Statistics');
+end
+
+% Print summary statistics
+fprintf('\n=== CONTROL PERFORMANCE SUMMARY ===\n');
+fprintf('Position Errors (RMS):\n');
+fprintf('  X: %.3f m,  Y: %.3f m,  Z: %.3f m\n', pos_rms(1), pos_rms(2), pos_rms(3));
+fprintf('  Roll: %.3f°,  Pitch: %.3f°,  Yaw: %.3f°\n', pos_rms(4), pos_rms(5), pos_rms(6));
+fprintf('\nControl Effort (RMS):\n');
+fprintf('  Surge: %.1f N,  Sway: %.1f N,  Heave: %.1f N\n', tau_rms(1), tau_rms(2), tau_rms(3));
+fprintf('  Roll: %.1f N·m,  Pitch: %.1f N·m,  Yaw: %.1f N·m\n', tau_rms(4), tau_rms(5), tau_rms(6));
 
