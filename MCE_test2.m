@@ -167,7 +167,8 @@ mc_mode = 'stabilize';      % Options: 'stabilize' or 'track'
 r_0b = [-35; 0; 4];         % [x, y, z] in body frame [m]
                             % x = -35m → 35m AFT of CO (at stern)
                             % y = 0m   → On centerline
-                            % z = 4m   → 4m below reference plane
+                            % z = 4m   → 4m below reference plane (on deck)
+                            % Extension is UPWARD (negative z direction)
 
 % Target position in NED frame (for 'track' mode)
 p_target_n = [0; 0; -10];   % [N, E, D] [m] - 10m above sea level
@@ -183,6 +184,12 @@ d3_nominal = 4.5;               % [m]
 % Initial manipulator configuration
 q_manip = [0; 0; d3_nominal];   % [q1, q2, d3]
 qdot_manip = [0; 0; 0];         % Initial joint velocities
+
+% Manipulator actuator dynamics (lowpass filters)
+% Each actuator is modeled as a first-order system: T*qdot_dot + qdot = qdot_cmd
+T_actuator = [0.3; 0.3; 0.5];   % Time constants [s] for [roll, pitch, extension]
+                                 % Roll/pitch: faster hydraulic gimbals (~0.3s)
+                                 % Extension: slower hydraulic cylinder (~0.5s)
 
 %% Improved Motion Compensation Control Gains
 
@@ -234,9 +241,11 @@ fprintf('\n');
 fprintf('=== MOTION COMPENSATION PLATFORM ===\n');
 fprintf('Mode: %s\n', mc_mode);
 fprintf('Platform base (body frame): [%.1f, %.1f, %.1f] m\n', r_0b(1), r_0b(2), r_0b(3));
-fprintf('Location: %.1f m aft of CO, %.1f m below reference\n', abs(r_0b(1)), r_0b(3));
+fprintf('Location: %.1f m aft of CO, %.1f m below reference (deck level)\n', abs(r_0b(1)), r_0b(3));
 fprintf('Manipulator type: RRP (Roll-Roll-Prismatic gimbal)\n');
-fprintf('Nominal extension: %.1f m\n', d3_nominal);
+fprintf('Nominal extension: %.1f m UPWARD from deck\n', d3_nominal);
+fprintf('Actuator time constants: [%.2f, %.2f, %.2f] s (roll, pitch, extension)\n', ...
+    T_actuator(1), T_actuator(2), T_actuator(3));
 fprintf('\n');
 fprintf('=== CONTROL GAINS ===\n');
 fprintf('Feedforward:  Roll/Pitch = %.2f, Heave = %.2f\n', K_rp_ff, K_heave_ff);
@@ -373,9 +382,9 @@ for k = 1:N
         q2_desired = -K_rp_ff * theta_vessel;
         
         % FEEDFORWARD: Extension to maintain constant NED height
-        % When vessel heaves down (z increases), extend cylinder
+        % When vessel heaves down (z increases), RETRACT cylinder (reduce d3)
         z_offset = z_vessel - eta_0(3);
-        d3_desired = d3_nominal + K_heave_ff * z_offset;
+        d3_desired = d3_nominal - K_heave_ff * z_offset;
         
         % Position errors
         e_q1 = q1_desired - q_manip(1);
@@ -442,9 +451,18 @@ for k = 1:N
             qdot_cmd(i) = qdot_cmd_filt(i);
         end
     end
-    
-    % === Integrate joint positions ===
-    q_manip_new = q_manip + h * qdot_cmd;
+
+    % === Actuator dynamics: First-order lowpass filter ===
+    % Model: T*qdot_dot + qdot = qdot_cmd
+    % Discrete: qdot(k+1) = qdot(k) + (h/T)*(qdot_cmd(k) - qdot(k))
+    qdot_manip_new = zeros(3,1);
+    for i = 1:3
+        alpha_actuator = h / (T_actuator(i) + h);
+        qdot_manip_new(i) = qdot_manip(i) + alpha_actuator * (qdot_cmd(i) - qdot_manip(i));
+    end
+
+    % === Integrate joint positions using filtered velocities ===
+    q_manip_new = q_manip + h * qdot_manip_new;
     
     % === Apply position limits with saturation ===
     if q_manip_new(1) > q1_lim(2)
@@ -472,7 +490,7 @@ for k = 1:N
     end
     
     % === Update manipulator state ===
-    qdot_manip = (q_manip_new - q_manip) / h;
+    qdot_manip = qdot_manip_new;  % Use filtered velocity from actuator dynamics
     q_manip = q_manip_new;
     qdot_cmd_filtered = qdot_cmd_filt;
     
@@ -706,8 +724,8 @@ plot([-Lwl/2-10, Lwl/2+10], [0, 0], 'c--', 'LineWidth', 2);
 plot(0, 0, 'ko', 'MarkerSize', 10, 'MarkerFaceColor', 'k');
 % Platform base
 plot(r_0b(1), r_0b(3), 'rs', 'MarkerSize', 15, 'MarkerFaceColor', 'r');
-% Platform with nominal extension
-platform_z_nominal = r_0b(3) + d3_nominal;
+% Platform with nominal extension (UPWARD, so subtract in z-down convention)
+platform_z_nominal = r_0b(3) - d3_nominal;
 plot([r_0b(1), r_0b(1)], [r_0b(3), platform_z_nominal], 'r-', 'LineWidth', 4);
 plot(r_0b(1), platform_z_nominal, 'go', 'MarkerSize', 12, 'MarkerFaceColor', 'g');
 xlabel('x (m) - Forward'); 
@@ -738,9 +756,9 @@ plot3(0, 0, 0, 'ko', 'MarkerSize', 14, 'MarkerFaceColor', 'k');
 plot3(r_0b(1), r_0b(2), r_0b(3), 'rs', ...
     'MarkerSize', 18, 'MarkerFaceColor', 'r', 'LineWidth', 2);
 
-% Platform extension (cylinder)
+% Platform extension (cylinder) - UPWARD extension
 [X_cyl, Y_cyl, Z_cyl] = cylinder(0.3, 20);
-Z_cyl = Z_cyl * d3_nominal + r_0b(3);
+Z_cyl = Z_cyl * (-d3_nominal) + r_0b(3);  % Negative for upward extension
 X_cyl = X_cyl + r_0b(1);
 Y_cyl = Y_cyl + r_0b(2);
 surf(X_cyl, Y_cyl, Z_cyl, 'FaceColor', 'r', 'FaceAlpha', 0.6, 'EdgeColor', 'none');
@@ -860,7 +878,7 @@ plot(tt, q_manip_log(:,3), 'b', 'LineWidth', 2.5, 'DisplayName', 'Extension (d�
 % Expected extension from feedforward
 z_vessel_motion = y_eta_log(:,3);
 z_offset_actual = z_vessel_motion - y_eta_log(1,3);
-d3_expected = d3_nominal + K_heave_ff * z_offset_actual;
+d3_expected = d3_nominal - K_heave_ff * z_offset_actual;
 plot(tt, d3_expected, 'g--', 'LineWidth', 1.8, 'DisplayName', 'Expected (FF)');
 
 plot(tt, d3_nominal*ones(size(tt)), 'r--', 'LineWidth', 1.5, 'DisplayName', 'Nominal');
@@ -1105,8 +1123,8 @@ function [p_e_n, v_e_n, R_e_n] = motionCompensatedPlatform(eta_vessel, nu_vessel
     R_e0 = R_x_q1 * R_y_q2;
     
     % End-effector position relative to platform base
-    % Extension along rotated z-axis (normal to rotated deck)
-    p_e0 = R_e0 * [0; 0; d3];
+    % Extension along NEGATIVE z-axis (upward, opposite to SNAME down)
+    p_e0 = R_e0 * [0; 0; -d3];
     
     % Position in vessel body frame
     p_eb = r_0b + p_e0;
@@ -1140,25 +1158,27 @@ function J = manipulatorJacobian(q1, q2, d3)
 %MANIPULATORJACOBIAN Geometric Jacobian for RRP manipulator
 %   Returns 3x3 matrix relating joint velocities to end-effector velocity
 %   v = J * [q1dot; q2dot; d3dot]
+%
+%   Updated for upward extension: p_e0 = R_e0 * [0; 0; -d3]
 
     c1 = cos(q1); s1 = sin(q1);
     c2 = cos(q2); s2 = sin(q2);
-    
+
     % ∂p/∂q1: Velocity due to rotation about x-axis
     dp_dq1 = [0;
               -d3*c1*c2;
-              -d3*s1*c2];
-    
+              d3*s1*c2];
+
     % ∂p/∂q2: Velocity due to rotation about y-axis
-    dp_dq2 = [d3*c2;
+    dp_dq2 = [-d3*c2;
               d3*s1*s2;
-              -d3*c1*s2];
-    
-    % ∂p/∂d3: Velocity due to prismatic extension
-    dp_dd3 = [s2;
+              d3*c1*s2];
+
+    % ∂p/∂d3: Velocity due to prismatic extension (upward)
+    dp_dd3 = [-s2;
               -s1*c2;
-              c1*c2];
-    
+              -c1*c2];
+
     J = [dp_dq1, dp_dq2, dp_dd3];
 end
 
