@@ -13,14 +13,14 @@ load supply;
 % Simulation Flags
 spreadingFlag = true;
 plotFlag = false;
-forceRaoFlag = true;
+forceRaoFlag = false;
 useIntegralAction = false;
 recordFlag = true;
 
 % Simulation parameters
 h = 0.1;
 T_final = 300;
-T_initTransient = 0;
+T_initTransient = 20;
 
 t = 0:h:T_final+T_initTransient-1;
 N = numel(t);
@@ -244,10 +244,18 @@ for k = 1:N
 
     % Record eta and nu if recordFlag is true
     if recordFlag
-        record_counter = record_counter + 1;
-        eta_recorded(record_counter, :) = eta.';
-        nu_recorded(record_counter, :) = nu.';
-        t_recorded(record_counter) = tk;
+        if forceRaoFlag;
+            record_counter = record_counter + 1;
+            eta_recorded(record_counter, :) = eta.';
+            nu_recorded(record_counter, :) = nu.';
+            t_recorded(record_counter) = tk;
+        else
+            record_counter = record_counter + 1;
+            eta_recorded(record_counter, :) = y_eta.';
+            nu_recorded(record_counter, :) = y_nu.';
+            t_recorded(record_counter) = tk;
+        end
+    
     end
 
 end

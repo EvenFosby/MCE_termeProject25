@@ -1,7 +1,6 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Motion Compensated Platform Simulation with MRU Sensor Noise
 % Loads recorded vessel motion data and adds realistic MRU measurement noise
-% MRU specifications based on Kongsberg Maritime state-of-the-art sensors
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 clear; close all; clc;
@@ -12,45 +11,42 @@ load('vessel_motion_data.mat');
 
 % Extract data from structure
 t = motion_data.time;
-eta_true = motion_data.eta;      % True positions [x, y, z, phi, theta, psi]
-nu_true = motion_data.nu;        % True velocities [u, v, w, p, q, r]
+eta_true = motion_data.eta;      % [x, y, z, phi, theta, psi]
+nu_true = motion_data.nu;        % [u, v, w, p, q, r]
 N = length(t);
-h = t(2) - t(1);                   % Sample time
+h = t(2) - t(1);
 
 fprintf('  Data loaded: %d samples, dt = %.4f s, duration = %.1f s\n', N, h, t(end));
 fprintf('  %s\n', motion_data.description);
 
-%% MRU Noise Specifications (Kongsberg Maritime state-of-the-art)
-% Based on Kongsberg Seapath 380+ and MRU 5+ specifications
-
+%% MRU Noise Specifications
 % Position noise standard deviations (RMS)
 sigma_eta = [
-    0.10;      % Surge (x) - 10 cm (position not directly measured, from integration)
-    0.10;      % Sway (y) - 10 cm (position not directly measured, from integration)
-    0.05;      % Heave (z) - 5 cm (primary measurement, very accurate)
+    0.10;      % Surge (x) - 10 cm 
+    0.10;      % Sway (y) - 10 cm 
+    0.05;      % Heave (z) - 5 cm 
     deg2rad(0.03);  % Roll (phi) - 0.03 degrees RMS
     deg2rad(0.03);  % Pitch (theta) - 0.03 degrees RMS
-    deg2rad(0.10);  % Yaw (psi) - 0.10 degrees RMS (with gyrocompass)
+    deg2rad(0.10);  % Yaw (psi) - 0.10 degrees RMS
 ];
 
 % Velocity noise standard deviations (RMS)
 sigma_nu = [
     0.05;      % Surge velocity (u) - 5 cm/s
     0.05;      % Sway velocity (v) - 5 cm/s
-    0.03;      % Heave velocity (w) - 3 cm/s (heave rate is well measured)
+    0.03;      % Heave velocity (w) - 3 cm/s 
     deg2rad(0.05);  % Roll rate (p) - 0.05 deg/s
     deg2rad(0.05);  % Pitch rate (q) - 0.05 deg/s
     deg2rad(0.08);  % Yaw rate (r) - 0.08 deg/s
 ];
 
 % Optional: Small sensor bias (can drift slowly over time)
-% Set to zero for no bias, or small values for realistic drift
 bias_eta = zeros(6, 1);
 bias_nu = zeros(6, 1);
 
-% Optional: Bias drift rates (random walk)
-drift_rate_eta = sigma_eta * 0.001;  % Very slow drift
-drift_rate_nu = sigma_nu * 0.001;    % Very slow drift
+% Optional: Bias drift rates 
+drift_rate_eta = sigma_eta * 0.001;  
+drift_rate_nu = sigma_nu * 0.001;   
 
 fprintf('\nMRU Noise Model (Kongsberg Maritime state-of-the-art):\n');
 fprintf('Position noise (RMS):\n');
@@ -61,8 +57,6 @@ fprintf('  Linear velocities: %.1f cm/s\n', sigma_nu(1)*100);
 fprintf('  Angular velocities: %.3f deg/s\n', rad2deg(sigma_nu(4)));
 
 %% Generate MRU measurements with noise
-fprintf('\nGenerating MRU measurements with sensor noise...\n');
-
 % Preallocate measurement arrays
 eta_mru = zeros(N, 6);
 nu_mru = zeros(N, 6);
@@ -76,7 +70,6 @@ rng(42);
 
 % Generate measurements for each time step
 for k = 1:N
-    % Update bias with random walk (slow drift)
     if k > 1
         bias_eta = bias_eta + sqrt(h) * drift_rate_eta .* randn(6, 1);
         bias_nu = bias_nu + sqrt(h) * drift_rate_nu .* randn(6, 1);
@@ -115,9 +108,9 @@ fprintf('  u: %.2f cm/s, v: %.2f cm/s, w: %.2f cm/s\n', ...
 fprintf('  p: %.3f deg/s, q: %.3f deg/s, r: %.3f deg/s\n', ...
     rad2deg(nu_rms(4)), rad2deg(nu_rms(5)), rad2deg(nu_rms(6)));
 
-%% Visualization
-fprintf('\nGenerating plots...\n');
+%% 
 
+%% Visualization
 % Create time vector relative to start
 tt = t - t(1);
 
@@ -223,7 +216,7 @@ title(sprintf('Heave Measurement Error (RMS: %.2f cm)', eta_rms(3)*100));
 ylim([-4*sigma_eta(3)*100, 4*sigma_eta(3)*100]);
 
 if exist('sgtitle', 'file')
-    sgtitle('Heave Motion - Critical for Motion Compensation');
+    sgtitle('Heave Motion');
 end
 
 % Figure 6: Error histograms to verify Gaussian distribution
@@ -246,7 +239,7 @@ for i = 1:6
     legend('Measured', 'Theoretical', 'Location', 'best');
 end
 if exist('sgtitle', 'file')
-    sgtitle('Position Error Distributions (should be Gaussian)');
+    sgtitle('Position Error Distributions');
 end
 
 fprintf('Done!\n');
@@ -261,7 +254,7 @@ mru_data.eta_error = eta_error;
 mru_data.nu_error = nu_error;
 mru_data.sigma_eta = sigma_eta;
 mru_data.sigma_nu = sigma_nu;
-mru_data.description = 'MRU measurements with Kongsberg Maritime state-of-the-art noise model';
+mru_data.description = 'MRU measurements with simulated noise';
 
 save('vessel_mru_data.mat', 'mru_data');
 fprintf('\nMRU data saved to vessel_motion_data.mat\n');
