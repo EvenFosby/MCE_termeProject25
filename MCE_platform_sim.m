@@ -1,553 +1,299 @@
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% DP vessel with motion compensated platfrom for MCE operations
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+clear; clc; close all;
 
-clear; close all; clc;
-
-rng(1);
-
-% Load vessel
-load supply;
-
-% Simulation Flags
-spreadingFlag = true;
-plotFlag = false;
-forceRaoFlag = true;
-useIntegralAction = false;
+load('vessel_motion_data.mat');
 
 % Simulation parameters
-h = 0.1;
-T_final = 300;
-T_initTransient = 0;
+t = motion_data.time;
+dt = t(2) - t(1);
+N = length(t);
 
-t = 0:h:T_final+T_initTransient-1;
-N = numel(t);
+% Extract motion data
+% eta = [x, y, z, phi, theta, psi]' (position and Euler angles in NED)
+% nu = [u, v, w, p, q, r]' (linear and angular velocities in body frame)
+eta = motion_data.eta;
+nu = motion_data.nu;
 
-% DP control objectiv
-eta_d = [0; 0; 0; 0; 0; 0];
-nu_d = [0; 0; 0; 0; 0; 0];
-x_d = [eta_d; nu_d];
-
-psi = eta_d(6);
-U = sqrt(nu_d(1)^2 + nu_d(2)^2);
-
-%% Sea state and wave spectrum
-Hs = 2.5;
-Tz = 6;
-
-T0 = Tz / 0.710;
-w0 = 2*pi / T0;
-
-gamma = 3.3;
-beta = deg2rad(140);
-
-spectrumType = 'JONSWAP';
-spectrumParam = [Hs, w0, gamma];
-
-maxFreq = 3.0;
-numFreqIntervals = 60;
-numDirections = 24;
-
-% Reshape vessel data o use 0 to maxFreq
-if vessel.forceRAO.w(end) > maxFreq
-    w_index = find(vessel.forceRAO.w > maxFreq, 1) - 1;
-    vessel.forceRAO.w = vessel.forceRAO.w(1:w_index); % frequency vector
-    for DOF = 1:length(vessel.forceRAO.amp)
-        vessel.forceRAO.amp{DOF} = vessel.forceRAO.amp{DOF}(1:w_index, :, :);
-        vessel.forceRAO.phase{DOF} = vessel.forceRAO.phase{DOF}(1:w_index, :, :);
-    end
+% Check dimensions and transpose if necessary (expect 6 x N)
+if size(eta, 1) > size(eta, 2)
+    eta = eta';
+    fprintf('Transposed eta to 6 x %d\n', size(eta, 2));
+end
+if size(nu, 1) > size(nu, 2)
+    nu = nu';
+    fprintf('Transposed nu to 6 x %d\n', size(nu, 2));
 end
 
-omegaMax = vessel.forceRAO.w(end);
+%% Robot base position in ship frame (fixed mounting)
+% Robot base is mounted on the deck:
+%   - 10 m forward from ship origin (x_s = 10)
+%   - 2 m to starboard (y_s = 2)
+%   - 5 m above ship origin (z_s = -5, negative because z_s points down)
+p_b_s = [-30; 1; -3];
 
-[S_M, Omega, Amp, ~, ~, mu] = waveDirectionalSpectrum(spectrumType, ...
-    spectrumParam, numFreqIntervals, omegaMax, spreadingFlag, numDirections);
+%% Compute frame transformations for entire time series
 
-%% Vessel model
-MRB = vessel.MRB;
+% Preallocate arrays
+R_sn = zeros(3, 3, N);  % Ship to NED rotation matrices
+R_bn = zeros(3, 3, N);  % Robot base to NED rotation matrices
+p_s_n = zeros(3, N);    % Ship position in NED
+p_b_n = zeros(3, N);    % Robot base position in NED
 
-% Compute A_eq and B_eq
-g = 9.81;
-omega_p = w0 - (w0^2 / g) * U * cos(beta); % Shifted encounter frequency
-vessel = computeManeuveringModel(vessel, omega_p, plotFlag);
+% Rotation matrix from ship to robot base (constant)
+R_bs = diag([-1, 1, -1]);  % 180° rotation about y-axis
 
-% Extract the diagonal elements of A_eq and B_eq for the first velocity
-MA = diag([vessel.A_eq(1,1,1,1), ...
-           vessel.A_eq(2,2,1,1), ...
-           vessel.A_eq(3,3,1,1), ...
-           vessel.A_eq(4,4,1,1), ...
-           vessel.A_eq(5,5,1,1), ...
-           vessel.A_eq(6,6,1,1)]);
+fprintf('Computing frame transformations for %d time steps...\n', N);
 
-M = MRB + MA;
-Minv = M \ eye(6);
+for i = 1:N
+    % Extract ship position and orientation
+    x = eta(1, i);
+    y = eta(2, i);
+    z = eta(3, i);
+    phi = eta(4, i);      % Roll
+    theta = eta(5, i);    % Pitch
+    psi = eta(6, i);      % Yaw (heading)
 
-D = diag([vessel.B_eq(1,1,1,1), ...
-          vessel.B_eq(2,2,1,1), ...
-          vessel.B_eq(3,3,1,1), ...
-          vessel.B_eq(4,4,1,1), ...
-          vessel.B_eq(5,5,1,1), ...
-          vessel.B_eq(6,6,1,1)]);
+    % Ship position in NED
+    p_s_n(:, i) = [x; y; z];
 
-% Linear restroing matrix
-m = vessel.main.m; % Vessel mass
-rho = 1025; g = 9.81; 
-Awp = vessel.main.Lwl * vessel.main.B * 0.8; % Waterplane displacement
-GM_T = vessel.main.GM_T;
-GM_L = vessel.main.GM_L;
+    % Rotation matrix from NED to ship frame (ZYX Euler angles)
+    R_sn(:,:,i) = Rzyx(phi, theta, psi);
 
-R33 = rho*g*Awp; 
-R44 = m*g*GM_T; 
-R55 = m * g * GM_L; % Calculate the restoring force for the roll motion
+    % Rotation matrix from NED to robot base frame
+    R_bn(:,:,i) = R_bs * R_sn(:,:,i);
 
-G = diag([0, 0, R33, R44, R55, 0]);
-
-% Kinematic mapping
-J = @(eta) eulerang(eta(4), eta(5), eta(6));
-
-% Continuous-time state derivatives:
-% eta_dot = J(eta)*nu
-% nu_dot  = -M\G * eta - M\D * nu + M\tau
-
-ship_dynamics = @(x, tau) [J(x(1:6)) * x(7:12); 
-                           -Minv*(D*x(7:12) + G*x(1:6)) + Minv*tau]; 
-
-%% DP controller 
-S = [1 1 0 0 0 1]';
-
-% Kp = diag([1 1 0 0 0 1]);
-% Ki = diag([1 1 0 0 0 1]);
-% Kd = diag([1 1 0 0 0 1]);
-
-% Computing PID-gains using Algorithem 15.2 from (Fossen, 2021)
-omega_b1 = 0.08; omega_b2 = 0.08; omega_b6 = 0.12;
-omega_b = [omega_b1, omega_b2, 0, 0, 0, omega_b6];
-Omega_b = diag(omega_b);
-
-zeta_pid1 = 1; zeta_pid2 = 1; zeta_pid6 = 1;
-zeta_pid = [zeta_pid1, zeta_pid2, 0, 0, 0, zeta_pid6];
-Zeta_pid = diag(zeta_pid);
-
-omega_n = zeros(1,6);
-for i = 1:length(omega_n)
-    omega_n(i) = omega_b(i) / ( sqrt(1 - 2*zeta_pid(i)^2 + sqrt(4*zeta_pid(i)^4 - 4*zeta_pid(i)^2 + 2) ) );
-end
-Omega_n = diag(omega_n);
-
-% Assuming roll, pitch and yaw is small => J_Theta(eta) = I
-% Kp = M*Omega_n^2;
-% Kd = 2.*M*Zeta_pid*Omega_n; % - D; 
-% Ki = 0.10*Kp*Omega_n;
-
-% PID controller
-tau_pid = @(eta, nu, eta_int, Kp, Ki, Kd) S.*(eulerang(eta(4), eta(5), eta(6))'*(-Kp*eta ...
-    - Kd*eulerang(eta(4), eta(5), eta(6))*nu - (useIntegralAction*Ki*eta_int)));
-
-% Heading lowpass filter
-T_psi = 12;
-alpha = h/(T_psi + h);
-psi_lp = 0;
-
-%% Motion compensated platform configuration
-
-% Motion compensation mode
-mc_mode = 'stabilize';
-
-% Target position {n}
-p_target_n = [50; 20; -8];
-
-% platform base location  {b}
-r_0b = [30; 0; -5];
-
-% Joints limits
-q1_lim = deg2rad([-15, 15]); % Roll limits
-q2_lim = deg2rad([-10, 10]); % Pitch limits
-d3_lim = [3, 6];  % Cylinder extension limits
-
-% Nominal cylinder extension
-d3_nominal = 4.5; 
-
-% Initial manipulator configuration
-q_manip = [0; 0; d3_nominal];
-qdot_manip = [0; 0; 0];
-
-
-%% Main simulation loop
-% Initial vessel state
-eta = zeros(6,1);       % eta = [x y z phi theta psi]
-nu = zeros(6,1);        % nu = [u v w p q r]
-x = [eta; nu];
-
-eta_int = zeros(6,1);
-
-% Preallocate log data
-x_log           = zeros(N, 12);
-tau_log         = zeros(N, 6);
-tau_ctrl_log    = zeros(N, 6);
-eta_wf_log      = zeros(N,6);
-nu_wf_log       = zeros(N, 6);
-nudot_wf_log    = zeros(N, 6);
-zeta_log        = zeros(N, 1);    % wave elevation
-y_eta_log       = zeros(N, 6);    % measured total position/orientation
-y_nu_log        = zeros(N, 6);    % measured total velocities
-y_nudot_log     = zeros(N, 6);    % measured total accelerations (WF only + LF approx)
-psi_lp_log      = zeros(N,1);
-
-simdata_fRAO = zeros(N, 7);
-simdata_mRAO = zeros(N, 19);
-
-for k = 1:N
-    tk = t(k);
-    eta = x(1:6);
-    nu = x(7:12);
-
-    % Lowpass filtering heading
-    psi_err = eta(6) - psi_lp;
-    psi_lp = psi_lp + alpha*psi_err;
-    psi_lp = ssa(psi_lp);
-    
-    % Add DP control on LF states
-    Jinv = eulerang(eta(4), eta(5), eta(6)) \ eye(6);
-    M_star = Jinv' * M * Jinv;
-
-    Kp = M_star*Omega_n^2;
-    Kd = 2.*M_star*Zeta_pid*Omega_n; % - D; 
-    Ki = 0.10*Kp*Omega_n;
-
-    tau_control = tau_pid(eta, nu, eta_int, Kp, Ki, Kd);
-
-    if useIntegralAction
-        e_eta = eta_d - eta;
-        eta_int = eta_int + h * (S .* e_eta);
-    end
-
-    if forceRaoFlag
-        % Force RAO
-        [tau_wave, zeta_wave] = waveForceRAO_v1(tk, S_M, Amp, Omega, mu, ...
-        vessel, U, psi, beta, numFreqIntervals);
-        simdata_fRAO(k, :) = [tau_wave', zeta_wave']; % Log force data
-
-        eta_wf = zeros(6,1);
-        nu_wf = zeros(6,1);
-        nudot_wf = zeros(6,1);
-    else
-        % Motion RAO
-        [eta_wf, nu_wf, nudot_wf, zeta_wave] = waveMotionRAO_v1(tk, ...
-            S_M, Amp, Omega, mu, vessel, U, psi, beta, numFreqIntervals);
-        simdata_mRAO(k, :) = [eta_wf', nu_wf', nudot_wf', zeta_wave]; % Log motion data
-        
-        tau_wave = zeros(6,1);
-    end
-    
-    tau = tau_control + tau_wave;
-
-    % Update states using rk4
-    x = rk4(ship_dynamics, h, x, tau);
-
-    % "Measured" total output = LF + WF (per Fossen 2021)
-    y_eta   = eta + eta_wf;
-    y_nu    = nu  + nu_wf;
-    y_nudot = nudot_wf; % LF accel not kept explicitly here
-
-    % Log everything
-    x_log(k,:)        = [eta.' nu.'];
-    tau_log(k,:)      = tau.';
-    tau_ctrl_log(k,:) = tau_control.';
-    eta_wf_log(k,:)   = eta_wf.';
-    nu_wf_log(k,:)    = nu_wf.';
-    nudot_wf_log(k,:) = nudot_wf.';
-    zeta_log(k)       = zeta_wave;
-    y_eta_log(k,:)    = y_eta.';
-    y_nu_log(k,:)     = y_nu.';
-    y_nudot_log(k,:)  = y_nudot.';
-    psi_lp_log(k,:)   = psi_lp;
-    
+    % Robot base position in NED
+    R_ns = R_sn(:,:,i).';  % Transpose = inverse for rotation matrix
+    p_b_n(:, i) = p_s_n(:, i) + R_ns * p_b_s;
 end
 
-% After your main loop, ignore transient
-idx0 = max(1, floor(T_initTransient/h) + 1);
-zeta = simdata_mRAO(idx0:end,19);
+fprintf('Frame transformations complete.\n\n');
 
-% 1) Should be ~ Hs/4
-fprintf('std(zeta)=%.3f m  (expected ~ %.3f m)\n', std(zeta), Hs/4);
+%% Extract Euler angles for plotting
+phi_deg = rad2deg(eta(4, :));
+theta_deg = rad2deg(eta(5, :));
+psi_deg = rad2deg(eta(6, :));
 
-% 2) Spectrum zeroth moment should match variance
-dOmega = Omega(2)-Omega(1);                % rad/s
-if spreadingFlag
-    dmu = 2*pi/numDirections;              % *** radians ***
-    m0  = sum(S_M(:))*dOmega*dmu;          % m^2
-else
-    m0  = sum(S_M(:,1))*dOmega;            % m^2
-end
-fprintf('m0 from S_M = %.3f m^2,  std(zeta)^2 = %.3f m^2\n', m0, var(zeta));
+%% Plotting
 
-%% === MOTION RAO PLOTS ===
-figure(101); clf;
+%% Figure 1: Ship and Robot Base Trajectories in NED Frame (3D)
+figure('Name', 'Trajectories in NED Frame', 'Position', [100 100 1200 800]);
 
-% Time-series (discard initial transient)
-startIndex = max(1, floor(T_initTransient / h) + 1);
-tt = t(startIndex:end) - t(startIndex);
-
-% Unpack motion data
-eta_WF    = simdata_mRAO(startIndex:end, 1:6);      % positions
-nu_WF     = simdata_mRAO(startIndex:end, 7:12);     % velocities
-nudot_WF  = simdata_mRAO(startIndex:end, 13:18);    % accelerations
-waveElevM = simdata_mRAO(startIndex:end, 19);       % wave elevation (from motion RAO)
-
-% ---- Wave spectrum ----
-subplot(2,1,1); hold on;
-if spreadingFlag
-    % Show a few representative directions
-    midIdx  = max(1, floor(length(mu)/2));
-    qtrIdx  = max(1, floor(length(mu)/4));
-    endIdx  = length(mu);
-
-    plot(Omega, S_M(:, midIdx), 'LineWidth', 2);
-    plot(Omega, S_M(:, qtrIdx), 'LineWidth', 2);
-    plot(Omega, S_M(:, endIdx), 'LineWidth', 2);
-
-    ylo = min(S_M(:)); yhi = max(S_M(:));
-    plot([w0 w0], [ylo yhi], 'k--', 'LineWidth', 1.5);
-    legend(sprintf('\\mu = %.0f°', rad2deg(mu(midIdx))), ...
-           sprintf('\\mu = %.0f°', rad2deg(mu(qtrIdx))), ...
-           sprintf('\\mu = %.0f°', rad2deg(mu(endIdx))), ...
-           sprintf('\\omega_0 = %.3g rad/s', w0), ...
-           'Location','best');
-else
-    plot(Omega, S_M(:,1), 'LineWidth', 2);
-    ylo = min(S_M(:)); yhi = max(S_M(:));
-    plot([w0 w0], [ylo yhi], 'k--', 'LineWidth', 1.5);
-    legend('S(\Omega)', sprintf('\\omega_0 = %.3g rad/s', w0), 'Location','best');
-end
-xlabel('\Omega (rad/s)'); ylabel('m^2 s');
-title([spectrumType, ' spectrum']); grid on; hold off;
-
-% ---- Wave elevation ----
-subplot(2,1,2);
-plot(tt, waveElevM, 'LineWidth', 2);
-xlabel('Time (s)'); ylabel('m'); grid on;
-title(sprintf('Wave Elevation for \\beta = %.0f° and H_s = %.1f m', rad2deg(beta), Hs));
-
-% ---- Positions (6-DOF) ----
-figure(102); clf;
-DOF_txt = {'x-position (m)', 'y-position (m)', 'z-position (m)', ...
-           'Roll angle (deg)', 'Pitch angle (deg)', 'Yaw angle (deg)'};
-T_scale = [1 1 1 180/pi 180/pi 180/pi];
-for k = 1:6
-    subplot(6,1,k);
-    plot(tt, T_scale(k)*eta_WF(:,k), 'LineWidth', 1.8);
-    grid on; xlabel('Time (s)'); ylabel(DOF_txt{k});
-end
-if exist('sgtitle','file'), sgtitle(sprintf('Wave-frequency positions (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs)); end
-
-% ---- Velocities (6-DOF) ----
-figure(103); clf;
-DOF_txt_v = {'Surge vel (m/s)','Sway vel (m/s)','Heave vel (m/s)', ...
-             'Roll rate (deg/s)','Pitch rate (deg/s)','Yaw rate (deg/s)'};
-for k = 1:6
-    subplot(6,1,k);
-    plot(tt, T_scale(k)*nu_WF(:,k), 'LineWidth', 1.8);
-    grid on; xlabel('Time (s)'); ylabel(DOF_txt_v{k});
-end
-if exist('sgtitle','file'), sgtitle(sprintf('Wave-frequency velocities (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs)); end
-
-% ---- Accelerations (6-DOF) ----
-figure(104); clf;
-DOF_txt_a = {'Surge acc (m/s^2)','Sway acc (m/s^2)','Heave acc (m/s^2)', ...
-             'Roll accel (deg/s^2)','Pitch accel (deg/s^2)','Yaw accel (deg/s^2)'};
-for k = 1:6
-    subplot(6,1,k);
-    plot(tt, T_scale(k)*nudot_WF(:,k), 'LineWidth', 1.8);
-    grid on; xlabel('Time (s)'); ylabel(DOF_txt_a{k});
-end
-if exist('sgtitle','file'), sgtitle(sprintf('Wave-frequency accelerations (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs)); end
-
-%% === FORCE RAO PLOTS ===
-figure(201); clf;
-
-% Time-series (discard initial transient)
-startIndex = max(1, floor(T_initTransient / h) + 1);
-tt = t(startIndex:end) - t(startIndex);
-
-% Unpack force data
-tau_wave  = simdata_fRAO(startIndex:end, 1:6);  % 6 DOF forces/moments
-waveElevF = simdata_fRAO(startIndex:end, 7);    % wave elevation (from force RAO)
-
-% ---- Wave spectrum ----
-subplot(2,1,1); hold on;
-if spreadingFlag
-    midIdx  = max(1, floor(length(mu)/2));
-    qtrIdx  = max(1, floor(length(mu)/4));
-    endIdx  = length(mu);
-
-    plot(Omega, S_M(:, midIdx), 'LineWidth', 2);
-    plot(Omega, S_M(:, qtrIdx), 'LineWidth', 2);
-    plot(Omega, S_M(:, endIdx), 'LineWidth', 2);
-
-    ylo = min(S_M(:)); yhi = max(S_M(:));
-    plot([w0 w0], [ylo yhi], 'k--', 'LineWidth', 1.5);
-    legend(sprintf('\\mu = %.0f°', rad2deg(mu(midIdx))), ...
-           sprintf('\\mu = %.0f°', rad2deg(mu(qtrIdx))), ...
-           sprintf('\\mu = %.0f°', rad2deg(mu(endIdx))), ...
-           sprintf('\\omega_0 = %.3g rad/s', w0), ...
-           'Location','best');
-else
-    plot(Omega, S_M(:,1), 'LineWidth', 2);
-    ylo = min(S_M(:)); yhi = max(S_M(:));
-    plot([w0 w0], [ylo yhi], 'k--', 'LineWidth', 1.5);
-    legend('S(\Omega)', sprintf('\\omega_0 = %.3g rad/s', w0), 'Location','best');
-end
-xlabel('\Omega (rad/s)'); ylabel('m^2 s');
-title([spectrumType, ' spectrum']); grid on; hold off;
-
-% ---- Wave elevation ----
-subplot(2,1,2);
-plot(tt, waveElevF, 'LineWidth', 2);
-xlabel('Time (s)'); ylabel('m'); grid on;
-title(sprintf('Wave Elevation for \\beta = %.0f° and H_s = %.1f m', rad2deg(beta), Hs));
-
-% ---- 6-DOF generalized 1st-order wave forces ----
-figure(202); clf;
-DOF_txt_tau = {'Surge (N)','Sway (N)','Heave (N)','Roll (N·m)','Pitch (N·m)','Yaw (N·m)'};
-for k = 1:6
-    subplot(6,1,k);
-    plot(tt, tau_wave(:,k), 'LineWidth', 1.8);
-    grid on; xlabel('Time (s)'); ylabel(DOF_txt_tau{k});
-end
-if exist('sgtitle','file'), sgtitle(sprintf('Generalized 1st-order Wave Forces (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs)); end
-
-%% === SHIP MOTION (Low-Frequency) PLOTS ===
-figure(301); clf;
-
-% Time-series (discard initial transient)
-startIndex = max(1, floor(T_initTransient / h) + 1);
-tt = t(startIndex:end) - t(startIndex);
-
-% Extract LF motion from x_log
-eta_LF = x_log(startIndex:end, 1:6);      % Low-frequency positions
-nu_LF  = x_log(startIndex:end, 7:12);     % Low-frequency velocities
-
-% ---- LF Positions (6-DOF) ----
-DOF_txt = {'x-position (m)', 'y-position (m)', 'z-position (m)', ...
-           'Roll angle (deg)', 'Pitch angle (deg)', 'Yaw angle (deg)'};
-T_scale = [1 1 1 180/pi 180/pi 180/pi];
-
-for k = 1:6
-    subplot(6,1,k);
-    plot(tt, T_scale(k)*eta_LF(:,k), 'LineWidth', 1.8, 'Color', [0 0.4470 0.7410]);
-    grid on; xlabel('Time (s)'); ylabel(DOF_txt{k});
-end
-if exist('sgtitle','file')
-    sgtitle(sprintf('Low-Frequency Ship Motion (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs));
-end
-
-% ---- LF Velocities (6-DOF) ----
-figure(302); clf;
-DOF_txt_v = {'Surge vel (m/s)','Sway vel (m/s)','Heave vel (m/s)', ...
-             'Roll rate (deg/s)','Pitch rate (deg/s)','Yaw rate (deg/s)'};
-for k = 1:6
-    subplot(6,1,k);
-    plot(tt, T_scale(k)*nu_LF(:,k), 'LineWidth', 1.8, 'Color', [0 0.4470 0.7410]);
-    grid on; xlabel('Time (s)'); ylabel(DOF_txt_v{k});
-end
-if exist('sgtitle','file')
-    sgtitle(sprintf('Low-Frequency Ship Velocities (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs));
-end
-
-%% === CONTROL EFFORT PLOTS ===
-figure(303); clf;
-
-% Extract control forces/moments from tau_log
-tau_ctrl = tau_ctrl_log(startIndex:end, :);
-
-% ---- Control forces and moments ----
-DOF_txt_tau = {'Surge Force (N)','Sway Force (N)','Heave Force (N)', ...
-               'Roll Moment (N·m)','Pitch Moment (N·m)','Yaw Moment (N·m)'};
-
-for k = 1:6
-    subplot(6,1,k);
-    plot(tt, tau_ctrl(:,k), 'LineWidth', 1.8, 'Color', [0.8500 0.3250 0.0980]);
-    grid on; xlabel('Time (s)'); ylabel(DOF_txt_tau{k});
-end
-if exist('sgtitle','file')
-    sgtitle(sprintf('DP Control Effort (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs));
-end
-
-%% === XY POSITION PLOT ===
-figure(304); clf;
-plot(eta_LF(:,1), eta_LF(:,2), 'LineWidth', 2, 'Color', [0 0.4470 0.7410]);
+subplot(2, 2, 1);
+plot3(p_s_n(1,:), p_s_n(2,:), p_s_n(3,:), 'b-', 'LineWidth', 2);
 hold on;
-plot(eta_LF(1,1), eta_LF(1,2), 'go', 'MarkerSize', 10, 'MarkerFaceColor', 'g', 'LineWidth', 2);
-plot(eta_LF(end,1), eta_LF(end,2), 'rs', 'MarkerSize', 10, 'MarkerFaceColor', 'r', 'LineWidth', 2);
-plot(0, 0, 'kx', 'MarkerSize', 15, 'LineWidth', 3);
-grid on; axis equal;
-xlabel('X Position (m)'); ylabel('Y Position (m)');
-legend('Vessel Trajectory', 'Start', 'End', 'Setpoint', 'Location', 'best');
-title(sprintf('Vessel XY Position (\\beta = %.0f°, H_s = %.1f m)', rad2deg(beta), Hs));
+plot3(p_b_n(1,:), p_b_n(2,:), p_b_n(3,:), 'r-', 'LineWidth', 2);
+grid on;
+xlabel('North [m]');
+ylabel('East [m]');
+zlabel('Down [m]');
+title('3D Trajectories in NED Frame');
+legend('Ship Origin', 'Robot Base', 'Location', 'best');
+axis equal;
+set(gca, 'ZDir', 'reverse');
 
-%% === CONTROL EFFORT STATISTICS ===
-figure(305); clf;
+% Add start and end markers
+plot3(p_s_n(1,1), p_s_n(2,1), p_s_n(3,1), 'go', 'MarkerSize', 10, 'LineWidth', 2);
+plot3(p_s_n(1,end), p_s_n(2,end), p_s_n(3,end), 'gs', 'MarkerSize', 10, 'LineWidth', 2);
+plot3(p_b_n(1,1), p_b_n(2,1), p_b_n(3,1), 'mo', 'MarkerSize', 10, 'LineWidth', 2);
 
-% Calculate RMS values for each DOF
-tau_rms = sqrt(mean(tau_ctrl.^2, 1));
-tau_max = max(abs(tau_ctrl), [], 1);
-tau_mean = mean(abs(tau_ctrl), 1);
+subplot(2, 2, 2);
+plot(p_s_n(1,:), p_s_n(2,:), 'b-', 'LineWidth', 2);
+hold on;
+plot(p_b_n(1,:), p_b_n(2,:), 'r-', 'LineWidth', 2);
+plot(p_s_n(1,1), p_s_n(2,1), 'go', 'MarkerSize', 10, 'LineWidth', 2);
+plot(p_s_n(1,end), p_s_n(2,end), 'gs', 'MarkerSize', 10, 'LineWidth', 2);
+grid on;
+xlabel('North [m]');
+ylabel('East [m]');
+title('Top View (North-East Plane)');
+legend('Ship Origin', 'Robot Base', 'Start', 'End', 'Location', 'best');
+axis equal;
 
-subplot(3,1,1);
-bar(tau_rms);
-set(gca, 'XTickLabel', {'Surge','Sway','Heave','Roll','Pitch','Yaw'});
-ylabel('RMS'); title('RMS Control Effort'); grid on;
+subplot(2, 2, 3);
+plot(t, p_s_n(3,:), 'b-', 'LineWidth', 2);
+hold on;
+plot(t, p_b_n(3,:), 'r-', 'LineWidth', 2);
+grid on;
+xlabel('Time [s]');
+ylabel('Down [m]');
+title('Vertical Position (Heave)');
+legend('Ship Origin', 'Robot Base', 'Location', 'best');
 
-subplot(3,1,2);
-bar(tau_max);
-set(gca, 'XTickLabel', {'Surge','Sway','Heave','Roll','Pitch','Yaw'});
-ylabel('Max Magnitude'); title('Maximum Control Effort'); grid on;
+subplot(2, 2, 4);
+plot(t, vecnorm(p_s_n(1:2,:) - p_s_n(1:2,1)), 'b-', 'LineWidth', 2);
+hold on;
+plot(t, vecnorm(p_b_n(1:2,:) - p_b_n(1:2,1)), 'r-', 'LineWidth', 2);
+grid on;
+xlabel('Time [s]');
+ylabel('Horizontal Distance [m]');
+title('Horizontal Displacement from Start');
+legend('Ship Origin', 'Robot Base', 'Location', 'best');
 
-subplot(3,1,3);
-bar(tau_mean);
-set(gca, 'XTickLabel', {'Surge','Sway','Heave','Roll','Pitch','Yaw'});
-ylabel('Mean Magnitude'); title('Mean Absolute Control Effort'); grid on;
+%% Figure 2: Ship Orientation (Euler Angles)
+figure('Name', 'Ship Orientation', 'Position', [150 150 1200 600]);
 
-if exist('sgtitle','file')
-    sgtitle('Control Effort Statistics');
+subplot(3, 1, 1);
+plot(t, phi_deg, 'LineWidth', 2);
+grid on;
+ylabel('Roll \phi [deg]');
+title('Ship Orientation (Euler Angles)');
+
+subplot(3, 1, 2);
+plot(t, theta_deg, 'LineWidth', 2);
+grid on;
+ylabel('Pitch \theta [deg]');
+
+subplot(3, 1, 3);
+plot(t, psi_deg, 'LineWidth', 2);
+grid on;
+xlabel('Time [s]');
+ylabel('Yaw \psi [deg]');
+
+%% Figure 3: Coordinate Frames Visualization at Selected Time Instants
+figure('Name', 'Coordinate Frames', 'Position', [200 200 1400 800]);
+
+% Select time instants to visualize (e.g., start, 25%, 50%, 75%, end)
+time_indices = round(linspace(1, N, 5));
+frame_scale = 5;  % Length of frame axes [m]
+
+for idx = 1:length(time_indices)
+    subplot(2, 3, idx);
+    i = time_indices(idx);
+
+    % Plot trajectories up to current time
+    plot3(p_s_n(1,1:i), p_s_n(2,1:i), p_s_n(3,1:i), 'b-', 'LineWidth', 1);
+    hold on;
+    plot3(p_b_n(1,1:i), p_b_n(2,1:i), p_b_n(3,1:i), 'r-', 'LineWidth', 1);
+
+    % Ship frame axes
+    ship_origin = p_s_n(:, i);
+    R_ns = R_sn(:,:,i).';
+    x_s_axis = R_ns * [frame_scale; 0; 0];
+    y_s_axis = R_ns * [0; frame_scale; 0];
+    z_s_axis = R_ns * [0; 0; frame_scale];
+
+    quiver3(ship_origin(1), ship_origin(2), ship_origin(3), ...
+            x_s_axis(1), x_s_axis(2), x_s_axis(3), 0, 'b-', 'LineWidth', 2);
+    quiver3(ship_origin(1), ship_origin(2), ship_origin(3), ...
+            y_s_axis(1), y_s_axis(2), y_s_axis(3), 0, 'g-', 'LineWidth', 2);
+    quiver3(ship_origin(1), ship_origin(2), ship_origin(3), ...
+            z_s_axis(1), z_s_axis(2), z_s_axis(3), 0, 'r-', 'LineWidth', 2);
+
+    % Robot base frame axes
+    robot_origin = p_b_n(:, i);
+    R_nb = R_bn(:,:,i).';
+    x_b_axis = R_nb * [frame_scale; 0; 0];
+    y_b_axis = R_nb * [0; frame_scale; 0];
+    z_b_axis = R_nb * [0; 0; frame_scale];
+
+    quiver3(robot_origin(1), robot_origin(2), robot_origin(3), ...
+            x_b_axis(1), x_b_axis(2), x_b_axis(3), 0, 'b--', 'LineWidth', 1.5);
+    quiver3(robot_origin(1), robot_origin(2), robot_origin(3), ...
+            y_b_axis(1), y_b_axis(2), y_b_axis(3), 0, 'g--', 'LineWidth', 1.5);
+    quiver3(robot_origin(1), robot_origin(2), robot_origin(3), ...
+            z_b_axis(1), z_b_axis(2), z_b_axis(3), 0, 'r--', 'LineWidth', 1.5);
+
+    grid on;
+    xlabel('North [m]');
+    ylabel('East [m]');
+    zlabel('Down [m]');
+    title(sprintf('t = %.2f s', t(i)));
+    axis equal;
+    set(gca, 'ZDir', 'reverse');
+    view(45, 20);
+
+    if idx == 1
+        legend('Ship Traj', 'Robot Traj', ...
+               'x_s (fwd)', 'y_s (stbd)', 'z_s (down)', ...
+               'x_b (back)', 'y_b (stbd)', 'y_b (up)', ...
+               'Location', 'best', 'FontSize', 7);
+    end
 end
 
-%% === POSITION ERROR STATISTICS ===
-figure(306); clf;
+%% Figure 4: Relative Position of Robot Base in Ship Frame
+figure('Name', 'Robot Base in Ship Frame', 'Position', [250 250 1200 400]);
 
-% Calculate position errors (assuming setpoint is at origin)
-pos_error = eta_LF;  % Since eta_d = [0 0 0 0 0 0]
-pos_error(:,4:6) = pos_error(:,4:6) * 180/pi;  % Convert angles to degrees
-
-pos_rms = sqrt(mean(pos_error.^2, 1));
-pos_max = max(abs(pos_error), [], 1);
-pos_mean = mean(abs(pos_error), 1);
-
-subplot(3,1,1);
-bar(pos_rms);
-set(gca, 'XTickLabel', {'X (m)','Y (m)','Z (m)','Roll (°)','Pitch (°)','Yaw (°)'});
-ylabel('RMS'); title('RMS Position Error'); grid on;
-
-subplot(3,1,2);
-bar(pos_max);
-set(gca, 'XTickLabel', {'X (m)','Y (m)','Z (m)','Roll (°)','Pitch (°)','Yaw (°)'});
-ylabel('Max'); title('Maximum Position Error'); grid on;
-
-subplot(3,1,3);
-bar(pos_mean);
-set(gca, 'XTickLabel', {'X (m)','Y (m)','Z (m)','Roll (°)','Pitch (°)','Yaw (°)'});
-ylabel('Mean'); title('Mean Absolute Position Error'); grid on;
-
-if exist('sgtitle','file')
-    sgtitle('Position Error Statistics');
+% Transform robot base position back to ship frame at each time
+% (should be constant since it's fixed to the ship)
+p_b_s_check = zeros(3, N);
+for i = 1:N
+    p_b_s_check(:, i) = R_sn(:,:,i) * (p_b_n(:, i) - p_s_n(:, i));
 end
 
-% Print summary statistics
-fprintf('\n=== CONTROL PERFORMANCE SUMMARY ===\n');
-fprintf('Position Errors (RMS):\n');
-fprintf('  X: %.3f m,  Y: %.3f m,  Z: %.3f m\n', pos_rms(1), pos_rms(2), pos_rms(3));
-fprintf('  Roll: %.3f°,  Pitch: %.3f°,  Yaw: %.3f°\n', pos_rms(4), pos_rms(5), pos_rms(6));
-fprintf('\nControl Effort (RMS):\n');
-fprintf('  Surge: %.1f N,  Sway: %.1f N,  Heave: %.1f N\n', tau_rms(1), tau_rms(2), tau_rms(3));
-fprintf('  Roll: %.1f N·m,  Pitch: %.1f N·m,  Yaw: %.1f N·m\n', tau_rms(4), tau_rms(5), tau_rms(6));
+% Debug: Check orthogonality of R_sn at a few time points
+fprintf('\n=== Debugging R_sn orthogonality ===\n');
+test_indices = [1, round(N/2), N];
+for idx = test_indices
+    R_test = R_sn(:,:,idx);
+    identity_check = R_test * R_test';
+    fprintf('Time index %d: ||R*R'' - I|| = %.2e\n', idx, norm(identity_check - eye(3), 'fro'));
+end
 
+% Debug: Check specific transformation at one time point
+i_test = round(N/2);
+fprintf('\n=== Debugging transformation at t = %.2f s ===\n', t(i_test));
+fprintf('p_b_s (input):           [%.4f, %.4f, %.4f]\n', p_b_s);
+fprintf('p_b_s_check (recovered): [%.4f, %.4f, %.4f]\n', p_b_s_check(:, i_test));
+fprintf('Difference:              [%.2e, %.2e, %.2e]\n', p_b_s_check(:, i_test) - p_b_s);
+
+subplot(1, 3, 1);
+plot(t, p_b_s_check(1,:), 'LineWidth', 2);
+grid on;
+xlabel('Time [s]');
+ylabel('x_s [m]');
+title('Robot Base Position in Ship Frame (should be constant)');
+
+subplot(1, 3, 2);
+plot(t, p_b_s_check(2,:), 'LineWidth', 2);
+grid on;
+xlabel('Time [s]');
+ylabel('y_s [m]');
+title('Robot Base Position in Ship Frame');
+
+subplot(1, 3, 3);
+plot(t, p_b_s_check(3,:), 'LineWidth', 2);
+grid on;
+xlabel('Time [s]');
+ylabel('z_s [m]');
+title('Robot Base Position in Ship Frame');
+
+%% Display statistics
+fprintf('=== Simulation Statistics ===\n');
+fprintf('Total time: %.2f s\n', t(end));
+fprintf('Time step: %.4f s\n', dt);
+fprintf('Number of samples: %d\n', N);
+fprintf('\n--- Ship Motion Range ---\n');
+fprintf('Position (NED):\n');
+fprintf('  North: [%.2f, %.2f] m\n', min(p_s_n(1,:)), max(p_s_n(1,:)));
+fprintf('  East:  [%.2f, %.2f] m\n', min(p_s_n(2,:)), max(p_s_n(2,:)));
+fprintf('  Down:  [%.2f, %.2f] m\n', min(p_s_n(3,:)), max(p_s_n(3,:)));
+fprintf('Orientation:\n');
+fprintf('  Roll:  [%.2f, %.2f] deg\n', min(phi_deg), max(phi_deg));
+fprintf('  Pitch: [%.2f, %.2f] deg\n', min(theta_deg), max(theta_deg));
+fprintf('  Yaw:   [%.2f, %.2f] deg\n', min(psi_deg), max(psi_deg));
+fprintf('\n--- Robot Base Motion Range (in NED) ---\n');
+fprintf('Position (NED):\n');
+fprintf('  North: [%.2f, %.2f] m\n', min(p_b_n(1,:)), max(p_b_n(1,:)));
+fprintf('  East:  [%.2f, %.2f] m\n', min(p_b_n(2,:)), max(p_b_n(2,:)));
+fprintf('  Down:  [%.2f, %.2f] m\n', min(p_b_n(3,:)), max(p_b_n(3,:)));
+fprintf('\n--- Robot Base Position in Ship Frame (verification) ---\n');
+fprintf('Expected: [%.2f, %.2f, %.2f] m\n', p_b_s);
+fprintf('Computed mean: [%.4f, %.4f, %.4f] m\n', mean(p_b_s_check, 2));
+fprintf('Standard deviation: [%.2e, %.2e, %.2e] m\n', std(p_b_s_check, 0, 2));
+
+%% Helper Functions
+
+function R = Rzyx(phi, theta, psi)
+    % RZYX Create rotation matrix from ZYX Euler angles (roll-pitch-yaw)
+    % Rotation from NED frame to body frame
+    % Input: phi (roll), theta (pitch), psi (yaw) in radians
+    % Output: R = Rz(psi) * Ry(theta) * Rx(phi)
+
+    cpsi = cos(psi);   spsi = sin(psi);
+    cth = cos(theta);  sth = sin(theta);
+    cphi = cos(phi);   sphi = sin(phi);
+
+    R = [cpsi*cth, -spsi*cphi + cpsi*sth*sphi,  spsi*sphi + cpsi*sth*cphi;
+         spsi*cth,  cpsi*cphi + spsi*sth*sphi, -cpsi*sphi + spsi*sth*cphi;
+         -sth,      cth*sphi,                   cth*cphi];
+end

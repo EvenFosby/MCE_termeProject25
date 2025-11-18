@@ -1,6 +1,5 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% This function computes the motion of a supply vessel under closed-loop 
-% DP-control
+% DP vessel with motion compensated platfrom for MCE operations
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 clear; close all; clc;
@@ -15,7 +14,6 @@ spreadingFlag = true;
 plotFlag = false;
 forceRaoFlag = true;
 useIntegralAction = false;
-recordFlag = true;
 
 % Simulation parameters
 h = 0.1;
@@ -25,9 +23,13 @@ T_initTransient = 0;
 t = 0:h:T_final+T_initTransient-1;
 N = numel(t);
 
-% Control objectiv
-psi = 0;
-U = 0;
+% DP control objectiv
+eta_d = [0; 0; 0; 0; 0; 0];
+nu_d = [0; 0; 0; 0; 0; 0];
+x_d = [eta_d; nu_d];
+
+psi = eta_d(6);
+U = sqrt(nu_d(1)^2 + nu_d(2)^2);
 
 %% Sea state and wave spectrum
 Hs = 2.5;
@@ -44,7 +46,7 @@ spectrumParam = [Hs, w0, gamma];
 
 maxFreq = 3.0;
 numFreqIntervals = 60;
-numDirections = 48;
+numDirections = 24;
 
 % Reshape vessel data o use 0 to maxFreq
 if vessel.forceRAO.w(end) > maxFreq
@@ -118,11 +120,11 @@ S = [1 1 0 0 0 1]';
 % Kd = diag([1 1 0 0 0 1]);
 
 % Computing PID-gains using Algorithem 15.2 from (Fossen, 2021)
-omega_b1 = 0.05; omega_b2 = 0.05; omega_b6 = 0.03;
+omega_b1 = 0.08; omega_b2 = 0.08; omega_b6 = 0.12;
 omega_b = [omega_b1, omega_b2, 0, 0, 0, omega_b6];
 Omega_b = diag(omega_b);
 
-zeta_pid1 = 0.80; zeta_pid2 = 0.80; zeta_pid6 = 1;
+zeta_pid1 = 1; zeta_pid2 = 1; zeta_pid6 = 1;
 zeta_pid = [zeta_pid1, zeta_pid2, 0, 0, 0, zeta_pid6];
 Zeta_pid = diag(zeta_pid);
 
@@ -133,14 +135,12 @@ end
 Omega_n = diag(omega_n);
 
 % Assuming roll, pitch and yaw is small => J_Theta(eta) = I
-Kp = M*Omega_n^2;
-
-Kd = 2.*M*Zeta_pid*Omega_n; % - D; 
-
-Ki = 0.10*Kp*Omega_n;
+% Kp = M*Omega_n^2;
+% Kd = 2.*M*Zeta_pid*Omega_n; % - D; 
+% Ki = 0.10*Kp*Omega_n;
 
 % PID controller
-tau_pid = @(eta, nu, eta_int) S.*(eulerang(eta(4), eta(5), eta(6))'*(-Kp*eta ...
+tau_pid = @(eta, nu, eta_int, Kp, Ki, Kd) S.*(eulerang(eta(4), eta(5), eta(6))'*(-Kp*eta ...
     - Kd*eulerang(eta(4), eta(5), eta(6))*nu - (useIntegralAction*Ki*eta_int)));
 
 % Heading lowpass filter
@@ -148,20 +148,35 @@ T_psi = 12;
 alpha = h/(T_psi + h);
 psi_lp = 0;
 
-%% Main loop
-% Initial vessel states
-eta_0   = [0 0 0 0 0 0]';       % eta = [x y z phi theta psi]
-nu_0    = [0 0 0 0 0 0]';       % nu = [u v w p q r]
-x       = [eta_0; nu_0];
+%% Motion compensated platform configuration
 
-eta_int = [0 0 0 0 0 0]';
+% Motion compensation mode
+mc_mode = 'stabilize';
 
-% desired vessel states
-eta_d   = [0 0 0 0 0 0]';
-nu_d    = [0 0 0 0 0 0]';
-x_d     = [eta_0; nu_0];
+% platform base location  {b}
+r_0b = [-30; 0; -3];
 
-% Preallocate data log
+% Joints limits
+q1_lim = deg2rad([-15, 15]); % Roll limits
+q2_lim = deg2rad([-10, 10]); % Pitch limits
+d3_lim = [3, 6];  % Cylinder extension limits
+
+% Fixed rotation of the manipulator w.r.t. platform base
+%R_
+
+
+
+
+
+%% Main simulation loop
+% Initial vessel state
+eta = zeros(6,1);       % eta = [x y z phi theta psi]
+nu = zeros(6,1);        % nu = [u v w p q r]
+x = [eta; nu];
+
+eta_int = zeros(6,1);
+
+% Preallocate log data
 x_log           = zeros(N, 12);
 tau_log         = zeros(N, 6);
 tau_ctrl_log    = zeros(N, 6);
@@ -177,24 +192,29 @@ psi_lp_log      = zeros(N,1);
 simdata_fRAO = zeros(N, 7);
 simdata_mRAO = zeros(N, 19);
 
-% Recording arrays (only used when recordFlag = true)
-eta_recorded = zeros(N, 6);
-nu_recorded = zeros(N, 6);
-t_recorded = zeros(N, 1);
-record_counter = 0;
-
 for k = 1:N
     tk = t(k);
     eta = x(1:6);
     nu = x(7:12);
 
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    % DP Control
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    
     % Lowpass filtering heading
     psi_err = eta(6) - psi_lp;
     psi_lp = psi_lp + alpha*psi_err;
     psi_lp = ssa(psi_lp);
     
     % Add DP control on LF states
-    tau_control = tau_pid(eta, nu, eta_int);
+    Jinv = eulerang(eta(4), eta(5), eta(6)) \ eye(6);
+    M_star = Jinv' * M * Jinv;
+
+    Kp = M_star*Omega_n^2;
+    Kd = 2.*M_star*Zeta_pid*Omega_n; % - D; 
+    Ki = 0.10*Kp*Omega_n;
+
+    tau_control = tau_pid(eta, nu, eta_int, Kp, Ki, Kd);
 
     if useIntegralAction
         e_eta = eta_d - eta;
@@ -221,6 +241,20 @@ for k = 1:N
     
     tau = tau_control + tau_wave;
 
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    % Manipulator motion compensation
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    % Rotation matrix from body to NED
+    R_nb = Rzyx(eta(4), eta(5), eta(6));
+
+    
+
+
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    % Update vessel states
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
     % Update states using rk4
     x = rk4(ship_dynamics, h, x, tau);
 
@@ -241,33 +275,7 @@ for k = 1:N
     y_nu_log(k,:)     = y_nu.';
     y_nudot_log(k,:)  = y_nudot.';
     psi_lp_log(k,:)   = psi_lp;
-
-    % Record eta and nu if recordFlag is true
-    if recordFlag
-        record_counter = record_counter + 1;
-        eta_recorded(record_counter, :) = eta.';
-        nu_recorded(record_counter, :) = nu.';
-        t_recorded(record_counter) = tk;
-    end
-
-end
-
-% Trim recorded data to actual size and save if recording was enabled
-if recordFlag
-    eta_recorded = eta_recorded(1:record_counter, :);
-    nu_recorded = nu_recorded(1:record_counter, :);
-    t_recorded = t_recorded(1:record_counter);
-
-    % Save recorded data to file
-    motion_data.time = t_recorded;
-    motion_data.eta = eta_recorded;
-    motion_data.nu = nu_recorded;
-    motion_data.description = 'Vessel eta (position/orientation) and nu (velocities) time series';
-    motion_data.eta_labels = {'x (m)', 'y (m)', 'z (m)', 'phi (rad)', 'theta (rad)', 'psi (rad)'};
-    motion_data.nu_labels = {'u (m/s)', 'v (m/s)', 'w (m/s)', 'p (rad/s)', 'q (rad/s)', 'r (rad/s)'};
-
-    save('vessel_motion_data.mat', 'motion_data');
-    fprintf('Recorded %d samples of eta and nu to vessel_motion_data.mat\n', record_counter);
+    
 end
 
 % After your main loop, ignore transient
