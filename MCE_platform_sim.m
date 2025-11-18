@@ -28,7 +28,7 @@ end
 %   - 10 m forward from ship origin (x_s = 10)
 %   - 2 m to starboard (y_s = 2)
 %   - 5 m above ship origin (z_s = -5, negative because z_s points down)
-p_b_s = [-30; 1; -3];
+p_b_s = [-30; 1; 0];
 
 %% Compute frame transformations for entire time series
 
@@ -199,7 +199,7 @@ for idx = 1:length(time_indices)
     zlabel('Down [m]');
     title(sprintf('t = %.2f s', t(i)));
     axis equal;
-    set(gca, 'ZDir', 'reverse');
+    %set(gca, 'ZDir', 'reverse');
     view(45, 20);
 
     if idx == 1
