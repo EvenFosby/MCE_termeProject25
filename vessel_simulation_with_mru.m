@@ -17,14 +17,14 @@ load supply;
 % Simulation Flags
 spreadingFlag = true;
 plotFlag = false;
-forceRaoFlag = false;
+forceRaoFlag = true;
 useIntegralAction = false;
 recordFlag = true;
 
 % Simulation parameters
 h = 0.1;
 T_final = 300;
-T_initTransient = 20;
+T_initTransient = 60;
 
 t = 0:h:T_final+T_initTransient-1;
 N = numel(t);
@@ -412,8 +412,35 @@ mru_data.description = 'MRU measurements with simulated noise';
 save('vessel_mru_data.mat', 'mru_data');
 fprintf('\nMRU data saved to vessel_mru_data.mat\n');
 
-%% Signal processing using Kalman Filter
-
+% %% Signal processing using Kalman Filter
+% f_m = 1/h_mru;
+% f_s = 100; 
+% 
+% Z = f_s / f_m;
+% if (mod(Z, 1) ~= 0 || Z < 1)
+%     error('f_s must be specified such that Z = f_s/f_m is an integer >= 1. Current Z = %.4f', Z);
+% end
+% 
+% h_s = 1/f_s;
+% 
+% % Model state space equations
+% J = eulerang(eta(4), eta(5), eta(6));
+% A = [zeros(6), J, zeros(6);
+%     zeros(6), -Minv*D, Minv*J;
+%     zeros(6), zeros(6), zeros(6)];
+% 
+% B = [zeros(6); Minv*B_out; zeros(6)];
+% 
+% C = [eye(6), zeros(6), zeros(6)];
+% 
+% E = [zeros(6); Minv; zeors(6)];
+% 
+% 
+% % Discrete matrices
+% Ad = eye(6) + h_s * A;
+% Bd = h_s * B;
+% Cd = C;
+% Ed = h_s * E;
 
 
 
