@@ -46,7 +46,12 @@ p_e_n = zeros(3, N);      % End-effector position in NED
 R_en = zeros(3, 3, N);    % End-effector rotation (NED to end-effector)
 
 % Define fixed transformation: robot base pose in ship frame
-R_bs = diag([-1, 1, -1]); % 180° rotation about y-axis
+base_orientation = deg2rad(180); % 180 degrees rotation about z-axis
+R_bs_x = diag([1, -1, -1]); % 180° rotation about x-axis
+R_bs_z = [cos(base_orientation), -sin(base_orientation), 0;
+          sin(base_orientation),  cos(base_orientation), 0;
+          0,                     0,                    1];
+R_bs = R_bs_z * R_bs_x; % Combined rotation from ship to robot base
 
 % Target end-effector position in NED (desired stable position)
 phi_0 = eta(4, 1);
@@ -99,8 +104,8 @@ for i = 1:N
 
     %% MOTION COMPENSATION
     % Counteract ship orientation to keep end-effector aligned with NED
-    q1 = -phi;    % Opposite of ship roll
-    q2 = -theta;  % Opposite of ship pitch
+    q1 = (phi - phi_0)*cos(base_orientation) - (theta - theta_0)*sin(base_orientation);
+    q2 = (phi - phi_0)*sin(base_orientation) + (theta - theta_0)*cos(base_orientation);
 
     % Target position relative to robot base in NED frame
     p_target_rel = p_e_n_target - p_b_n(:, i);
