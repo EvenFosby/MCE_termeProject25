@@ -46,7 +46,7 @@ beta = deg2rad(140);
 spectrumType = 'JONSWAP';
 spectrumParam = [Hs, w0, gamma];
 
-maxFreq = pi;
+maxFreq = 3.0;
 numFreqIntervals = 200;
 numDirections = 48;
 

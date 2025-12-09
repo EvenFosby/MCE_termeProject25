@@ -64,7 +64,7 @@ p_s_n_0 = eta(1:3, 1);
 R_ns_0 = R_sn_0.';
 p_b_n_0 = p_s_n_0 + R_ns_0 * p_b_s;
 
-% Initial end-effector position (with all joints at zero: q1=0, q2=0, d3=0)
+% Initial end-effector position (q1=0, q2=0, d3=c3)
 R_bn_0 = R_bs * R_sn_0;
 R_nb_0 = R_bn_0.';
 p_e_b_0 = [0; 0; c3]; 
