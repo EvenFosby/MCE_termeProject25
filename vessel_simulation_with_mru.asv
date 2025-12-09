@@ -67,7 +67,7 @@ omegaMax = vessel.forceRAO.w(end);
 
 %% Vessel model
 MRB = vessel.MRB;
-Bv = vessel.Bv;
+Bv
 
 % Compute A_eq and B_eq
 g = 9.81;
@@ -85,13 +85,12 @@ MA = diag([vessel.A_eq(1,1,1,1), ...
 M = MRB + MA;
 Minv = M \ eye(6);
 
-B_eq = diag([vessel.B_eq(1,1,1,1), ...
+D = diag([vessel.B_eq(1,1,1,1), ...
           vessel.B_eq(2,2,1,1), ...
           vessel.B_eq(3,3,1,1), ...
           vessel.B_eq(4,4,1,1), ...
           vessel.B_eq(5,5,1,1), ...
           vessel.B_eq(6,6,1,1)]);
-D = B_eq + Bv;
 
 % Linear restoring matrix
 m = vessel.main.m; % Vessel mass
@@ -99,11 +98,10 @@ rho = 1025; g = 9.81;
 Awp = vessel.main.Lwl * vessel.main.B * 0.8; % Waterplane displacement
 GM_T = vessel.main.GM_T;
 GM_L = vessel.main.GM_L;
-nabla = vessel.main.nabla;
 
 R33 = rho*g*Awp;
-R44 = m*g* nabla * GM_T;
-R55 = m * g * nabla * GM_L; % Calculate the restoring force for the roll motion
+R44 = m*g*GM_T;
+R55 = m * g * GM_L; % Calculate the restoring force for the roll motion
 
 G = diag([0, 0, R33, R44, R55, 0]);
 
