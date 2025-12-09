@@ -35,9 +35,9 @@ U = 0;
 
 %% Sea state and wave spectrum
 Hs = 2.5;
-Tz = 6;
+T0 = 8.8;
 
-T0 = Tz / 0.710;
+Tz = T0 * 0.710;
 w0 = 2*pi / T0;
 
 gamma = 3.3;
@@ -46,8 +46,8 @@ beta = deg2rad(140);
 spectrumType = 'JONSWAP';
 spectrumParam = [Hs, w0, gamma];
 
-maxFreq = 3.0;
-numFreqIntervals = 60;
+maxFreq = pi;
+numFreqIntervals = 200;
 numDirections = 48;
 
 % Reshape vessel data to use 0 to maxFreq
