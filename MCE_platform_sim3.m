@@ -1,15 +1,15 @@
 clear; clc; close all;
 
-load('vessel_motion_data.mat');
+load('vessel_mru_data.mat');
 
 % Simulation parameters
-t = motion_data.time;
+t = mru_data.time;
 dt = t(2) - t(1);
 N = length(t);
 
 % Extract motion data
-eta = motion_data.eta'; % Position and Euler angles in NED
-nu = motion_data.nu'; % Linear and angular velocities in body frame
+eta = mru_data.eta_mru'; % Position and Euler angles in NED
+nu = mru_data.nu_mru'; % Linear and angular velocities in body frame
 
 %% Robot base position in ship frame
 p_b_s = [-30; 0; -3];

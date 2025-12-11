@@ -34,7 +34,7 @@ psi = 0;
 U = 0;
 
 %% Sea state and wave spectrum
-Hs = 2.5;
+Hs = 2.0;
 T0 = 8.8;
 
 Tz = T0 * 0.710;
@@ -67,7 +67,7 @@ omegaMax = vessel.forceRAO.w(end);
 
 %% Vessel model
 MRB = vessel.MRB;
-Bv = vessel.Bv;
+Bv = vessel.Bv(:,:,1);
 
 % Compute A_eq and B_eq
 g = 9.81;
@@ -102,8 +102,8 @@ GM_L = vessel.main.GM_L;
 nabla = vessel.main.nabla;
 
 R33 = rho*g*Awp;
-R44 = m*g* nabla * GM_T;
-R55 = m * g * nabla * GM_L; % Calculate the restoring force for the roll motion
+R44 = m*g* 1 * GM_T;
+R55 = m * g * 1 * GM_L; % Calculate the restoring force for the roll motion
 
 G = diag([0, 0, R33, R44, R55, 0]);
 
@@ -324,12 +324,12 @@ sigma_eta = [
 
 % Velocity noise standard deviations (RMS)
 sigma_nu = [
-    0.05;      % Surge velocity (u) - 5 cm/s
-    0.05;      % Sway velocity (v) - 5 cm/s
-    0.03;      % Heave velocity (w) - 3 cm/s
-    deg2rad(0.05);  % Roll rate (p) - 0.05 deg/s
-    deg2rad(0.05);  % Pitch rate (q) - 0.05 deg/s
-    deg2rad(0.08);  % Yaw rate (r) - 0.08 deg/s
+    0.03;      % Surge velocity (u)
+    0.03;      % Sway velocity (v)
+    0.01;      % Heave velocity (w)
+    deg2rad(0.005);  % Roll rate (p)
+    deg2rad(0.005);  % Pitch rate (q)
+    deg2rad(0.02);  % Yaw rate (r)
 ];
 
 % Optional: Small sensor bias (can drift slowly over time)

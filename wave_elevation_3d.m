@@ -9,9 +9,9 @@ clear all; clc; close all;
 rng(1);  % For reproducibility
 
 %% Wave parameters from ship_motion_fRAO_v2.m
-Hs = 2.5;           % Significant wave height [m]
-Tz = 6;             % Zero-crossing period [s]
-T0 = Tz / 0.710;    % Peak period [s]
+Hs = 2.0;           % Significant wave height [m]
+T0 = 8.8;           % Peak period [s]
+Tz = T0*0.710;             % Zero-crossing period [s]
 w0 = 2*pi / T0;     % Peak frequency [rad/s]
 gamma = 3.3;        % JONSWAP peak enhancement factor
 beta = deg2rad(140); % Mean wave direction [rad]
@@ -23,7 +23,7 @@ n_zscale = 5;       % Z-axis scaling factor (n times Hs for better visibility)
 g = 9.81;           % Gravity [m/s^2]
 h = Inf;            % Water depth (infinite = deep water)
 numFreqIntervals = 200;  % Number of wave components (200 for better visualization)
-numDirections = 24;      % Number of directional bins
+numDirections = 48;      % Number of directional bins
 
 % Frequency range
 maxFreq = 3.0;      % Maximum frequency [rad/s]
