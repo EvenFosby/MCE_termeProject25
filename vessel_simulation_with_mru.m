@@ -314,22 +314,22 @@ fprintf('  Processing %d samples, dt = %.4f s, duration = %.1f s\n', N_mru, h_mr
 %% MRU Noise Specifications
 % Position noise standard deviations (RMS)
 sigma_eta = [
-    0.10;      % Surge (x) - 10 cm
-    0.10;      % Sway (y) - 10 cm
-    0.05;      % Heave (z) - 5 cm
-    deg2rad(0.03);  % Roll (phi) - 0.03 degrees RMS
-    deg2rad(0.03);  % Pitch (theta) - 0.03 degrees RMS
-    deg2rad(0.10);  % Yaw (psi) - 0.10 degrees RMS
+    0.03;      % Surge (x)
+    0.03;      % Sway (y)
+    0.01;      % Heave (z)
+    deg2rad(0.005);  % Roll (phi)
+    deg2rad(0.005);  % Pitch (theta)
+    deg2rad(0.02);  % Yaw (psi)
 ];
 
 % Velocity noise standard deviations (RMS)
 sigma_nu = [
-    0.03;      % Surge velocity (u)
-    0.03;      % Sway velocity (v)
-    0.01;      % Heave velocity (w)
-    deg2rad(0.005);  % Roll rate (p)
-    deg2rad(0.005);  % Pitch rate (q)
-    deg2rad(0.02);  % Yaw rate (r)
+    0.05;      % Surge velocity (u)
+    0.05;      % Sway velocity (v)
+    0.03;      % Heave velocity (w)
+    deg2rad(0.05);  % Roll rate (p)
+    deg2rad(0.05);  % Pitch rate (q)
+    deg2rad(0.08);  % Yaw rate (r)
 ];
 
 % Optional: Small sensor bias (can drift slowly over time)
@@ -414,38 +414,6 @@ mru_data.description = 'MRU measurements with simulated noise';
 
 save('vessel_mru_data.mat', 'mru_data');
 fprintf('\nMRU data saved to vessel_mru_data.mat\n');
-
-% %% Signal processing using Kalman Filter
-% f_m = 1/h_mru;
-% f_s = 100; 
-% 
-% Z = f_s / f_m;
-% if (mod(Z, 1) ~= 0 || Z < 1)
-%     error('f_s must be specified such that Z = f_s/f_m is an integer >= 1. Current Z = %.4f', Z);
-% end
-% 
-% h_s = 1/f_s;
-% 
-% % Model state space equations
-% J = eulerang(eta(4), eta(5), eta(6));
-% A = [zeros(6), J, zeros(6);
-%     zeros(6), -Minv*D, Minv*J;
-%     zeros(6), zeros(6), zeros(6)];
-% 
-% B = [zeros(6); Minv*B_out; zeros(6)];
-% 
-% C = [eye(6), zeros(6), zeros(6)];
-% 
-% E = [zeros(6); Minv; zeors(6)];
-% 
-% 
-% % Discrete matrices
-% Ad = eye(6) + h_s * A;
-% Bd = h_s * B;
-% Cd = C;
-% Ed = h_s * E;
-
-
 
 %% Visualization
 fprintf('\n=== GENERATING PLOTS ===\n');
