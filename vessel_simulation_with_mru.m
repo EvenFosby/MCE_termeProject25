@@ -1,13 +1,10 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% Combined Vessel Motion Simulation with MRU Noise
+% Vessel Motion Simulation with simulated MRU Noise
 % This script simulates vessel motion under wave disturbances and applies
 % realistic MRU sensor noise to generate both true and measured motion data
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 clear; close all; clc;
-
-%% PART 1: VESSEL MOTION SIMULATION (from Ship_motion_RAO.m)
-fprintf('=== PART 1: VESSEL MOTION SIMULATION ===\n');
 
 rng(1);
 
@@ -101,9 +98,10 @@ GM_T = vessel.main.GM_T;
 GM_L = vessel.main.GM_L;
 nabla = vessel.main.nabla;
 
+% Calculate the restoring forces
 R33 = rho*g*Awp;
 R44 = m*g* 1 * GM_T;
-R55 = m * g * 1 * GM_L; % Calculate the restoring force for the roll motion
+R55 = m * g * 1 * GM_L; 
 
 G = diag([0, 0, R33, R44, R55, 0]);
 
@@ -173,10 +171,10 @@ tau_ctrl_log    = zeros(N, 6);
 eta_wf_log      = zeros(N,6);
 nu_wf_log       = zeros(N, 6);
 nudot_wf_log    = zeros(N, 6);
-zeta_log        = zeros(N, 1);    % wave elevation
-y_eta_log       = zeros(N, 6);    % measured total position/orientation
-y_nu_log        = zeros(N, 6);    % measured total velocities
-y_nudot_log     = zeros(N, 6);    % measured total accelerations (WF only + LF approx)
+zeta_log        = zeros(N, 1);
+y_eta_log       = zeros(N, 6);
+y_nu_log        = zeros(N, 6);
+y_nudot_log     = zeros(N, 6);    
 psi_lp_log      = zeros(N,1);
 
 simdata_fRAO = zeros(N, 7);
@@ -210,7 +208,7 @@ for k = 1:N
         % Force RAO
         [tau_wave, zeta_wave] = waveForceRAO_v1(tk, S_M, Amp, Omega, mu, ...
         vessel, U, psi, beta, numFreqIntervals);
-        simdata_fRAO(k, :) = [tau_wave', zeta_wave']; % Log force data
+        simdata_fRAO(k, :) = [tau_wave', zeta_wave'];
 
         eta_wf = zeros(6,1);
         nu_wf = zeros(6,1);
@@ -219,7 +217,7 @@ for k = 1:N
         % Motion RAO
         [eta_wf, nu_wf, nudot_wf, zeta_wave] = waveMotionRAO_v1(tk, ...
             S_M, Amp, Omega, mu, vessel, U, psi, beta, numFreqIntervals);
-        simdata_mRAO(k, :) = [eta_wf', nu_wf', nudot_wf', zeta_wave]; % Log motion data
+        simdata_mRAO(k, :) = [eta_wf', nu_wf', nudot_wf', zeta_wave];
 
         tau_wave = zeros(6,1);
     end
@@ -229,10 +227,10 @@ for k = 1:N
     % Update states using rk4
     x = rk4(ship_dynamics, h, x, tau);
 
-    % "Measured" total output = LF + WF (per Fossen 2021)
+    % "Measured" total output
     y_eta   = eta + eta_wf;
     y_nu    = nu  + nu_wf;
-    y_nudot = nudot_wf; % LF accel not kept explicitly here
+    y_nudot = nudot_wf;
 
     % Log everything
     x_log(k,:)        = [eta.' nu.'];
@@ -283,25 +281,23 @@ if recordFlag
     fprintf('Recorded %d samples of eta and nu to vessel_motion_data.mat\n', record_counter);
 end
 
-% After your main loop, ignore transient
+% Ignore transient
 idx0 = max(1, floor(T_initTransient/h) + 1);
 zeta = simdata_mRAO(idx0:end,19);
 
 % Spectrum validation
 fprintf('std(zeta)=%.3f m  (expected ~ %.3f m)\n', std(zeta), Hs/4);
 
-dOmega = Omega(2)-Omega(1);                % rad/s
+dOmega = Omega(2)-Omega(1);
 if spreadingFlag
-    dmu = 2*pi/numDirections;              % radians
-    m0  = sum(S_M(:))*dOmega*dmu;          % m^2
+    dmu = 2*pi/numDirections;
+    m0  = sum(S_M(:))*dOmega*dmu;
 else
-    m0  = sum(S_M(:,1))*dOmega;            % m^2
+    m0  = sum(S_M(:,1))*dOmega;
 end
 fprintf('m0 from S_M = %.3f m^2,  std(zeta)^2 = %.3f m^2\n', m0, var(zeta));
 
-%% PART 2: MRU NOISE GENERATION (from mru_noise_sim.m)
-fprintf('\n=== PART 2: MRU NOISE GENERATION ===\n');
-
+%% MRU NOISE GENERATION
 % Extract data from recorded motion
 eta_true = eta_recorded;
 nu_true = nu_recorded;
@@ -309,34 +305,32 @@ t_mru = t_recorded;
 N_mru = length(t_mru);
 h_mru = t_mru(2) - t_mru(1);
 
-fprintf('  Processing %d samples, dt = %.4f s, duration = %.1f s\n', N_mru, h_mru, t_mru(end));
-
 %% MRU Noise Specifications
 % Position noise standard deviations (RMS)
 sigma_eta = [
-    0.03;      % Surge (x)
-    0.03;      % Sway (y)
-    0.01;      % Heave (z)
-    deg2rad(0.005);  % Roll (phi)
-    deg2rad(0.005);  % Pitch (theta)
-    deg2rad(0.02);  % Yaw (psi)
+    0.03;               % Surge (x)
+    0.03;               % Sway (y)
+    0.01;               % Heave (z)
+    deg2rad(0.005);     % Roll (phi)
+    deg2rad(0.005);     % Pitch (theta)
+    deg2rad(0.02);      % Yaw (psi)
 ];
 
 % Velocity noise standard deviations (RMS)
 sigma_nu = [
-    0.05;      % Surge velocity (u)
-    0.05;      % Sway velocity (v)
-    0.03;      % Heave velocity (w)
-    deg2rad(0.05);  % Roll rate (p)
-    deg2rad(0.05);  % Pitch rate (q)
-    deg2rad(0.08);  % Yaw rate (r)
+    0.05;               % Surge velocity (u)
+    0.05;               % Sway velocity (v)
+    0.03;               % Heave velocity (w)
+    deg2rad(0.05);      % Roll rate (p)
+    deg2rad(0.05);      % Pitch rate (q)
+    deg2rad(0.08);      % Yaw rate (r)
 ];
 
-% Optional: Small sensor bias (can drift slowly over time)
+% Small sensor bias
 bias_eta = zeros(6, 1);
 bias_nu = zeros(6, 1);
 
-% Optional: Bias drift rates
+% Bias drift rates
 drift_rate_eta = sigma_eta * 0.001;
 drift_rate_nu = sigma_nu * 0.001;
 
@@ -348,34 +342,32 @@ fprintf('Velocity noise (RMS):\n');
 fprintf('  Linear velocities: %.1f cm/s\n', sigma_nu(1)*100);
 fprintf('  Angular velocities: %.3f deg/s\n', rad2deg(sigma_nu(4)));
 
-%% Generate MRU measurements with noise
-% Preallocate measurement arrays
+%% Generate MRU measurements
+
+rng(42);
+
+% Preallocate arrays
 eta_mru = zeros(N_mru, 6);
 nu_mru = zeros(N_mru, 6);
 
-% Preallocate bias arrays
 bias_eta_log = zeros(N_mru, 6);
 bias_nu_log = zeros(N_mru, 6);
 
-% Set random seed for reproducibility
-rng(42);
-
-% Generate measurements for each time step
+% Generate measurements
 for k = 1:N_mru
     if k > 1
         bias_eta = bias_eta + sqrt(h_mru) * drift_rate_eta .* randn(6, 1);
         bias_nu = bias_nu + sqrt(h_mru) * drift_rate_nu .* randn(6, 1);
     end
 
-    % Add white Gaussian noise to position measurements
+    % Add white Gaussian noise
     noise_eta = sigma_eta .* randn(6, 1);
     eta_mru(k, :) = eta_true(k, :)' + noise_eta + bias_eta;
 
-    % Add white Gaussian noise to velocity measurements
     noise_nu = sigma_nu .* randn(6, 1);
     nu_mru(k, :) = nu_true(k, :)' + noise_nu + bias_nu;
 
-    % Log bias for analysis
+    % Log bias
     bias_eta_log(k, :) = bias_eta';
     bias_nu_log(k, :) = bias_nu';
 end

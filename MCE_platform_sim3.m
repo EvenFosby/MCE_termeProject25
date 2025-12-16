@@ -8,52 +8,51 @@ dt = t(2) - t(1);
 N = length(t);
 
 % Extract motion data
-eta = mru_data.eta_mru'; % Position and Euler angles in NED
-nu = mru_data.nu_mru'; % Linear and angular velocities in body frame
+eta = mru_data.eta_mru';
+nu = mru_data.nu_mru';
 
 %% Robot base position in ship frame
 p_b_s = [-30; 0; -3];
 
-%% Compute frame transformations using homogeneous transforms
 % Preallocate arrays for homogeneous transformation matrices
 T_n_s = zeros(4, 4, N);  % Ship pose in NED
 T_n_b = zeros(4, 4, N);  % Robot base in NED
 
 % Preallocate position and rotation arrays for plotting
-p_s_n = zeros(3, N);    % Ship position in NED
-p_b_n = zeros(3, N);    % Robot base position in NED
-R_sn = zeros(3, 3, N);  % Ship rotation matrices (NED to ship)
-R_bn = zeros(3, 3, N);  % Robot base rotation matrices (NED to base)
+p_s_n = zeros(3, N);    % Ship position in (NED)
+p_b_n = zeros(3, N);    % Manipulator base position (NED)
+R_sn = zeros(3, 3, N);  % NED to ship
+R_bn = zeros(3, 3, N);  % NED to base
 
 %% Manipulator Kinematics (3-DOF: RRP configuration)
+
 % Joint parameters
 % q1: Revolute joint 1 (rotation about x-axis)
 % q2: Revolute joint 2 (rotation about y-axis)
 % d3: Prismatic joint 3 (translation along z-axis)
 % c3: Constant offset on prismatic joint (end-effector middel position)
 
-c3 = 6; % Constant offset [m]
+c3 = 6;
 
-% Motion compensation: joint trajectories will be computed to stabilize end-effector
 % Preallocate joint trajectory arrays
-q1_traj = zeros(N,1);  % Joint 1: rotation about x-axis (compensates roll)
-q2_traj = zeros(N,1);  % Joint 2: rotation about y-axis (compensates pitch)
-d3_traj = zeros(N,1);  % Joint 3: prismatic along z-axis (compensates heave)
+q1_traj = zeros(N,1);
+q2_traj = zeros(N,1);
+d3_traj = zeros(N,1);
 
 % Preallocate end-effector data
-T_n_e = zeros(4, 4, N);  % End-effector pose in NED frame
+T_n_e = zeros(4, 4, N);   % End-effector pose in NED frame
 p_e_n = zeros(3, N);      % End-effector position in NED
 R_en = zeros(3, 3, N);    % End-effector rotation (NED to end-effector)
 
-% Define fixed transformation: robot base pose in ship frame
-base_orientation = deg2rad(180); % 180 degrees rotation about z-axis
-R_bs_x = diag([1, -1, -1]); % 180° rotation about x-axis
+% Define transformation for robot base pose in ship frame
+base_orientation = deg2rad(180);
+R_bs_x = diag([1, -1, -1]);
 R_bs_z = [cos(base_orientation), -sin(base_orientation), 0;
           sin(base_orientation),  cos(base_orientation), 0;
           0,                     0,                    1];
-R_bs = R_bs_z * R_bs_x; % Combined rotation from ship to robot base
+R_bs = R_bs_z * R_bs_x; 
 
-% Target end-effector position in NED (desired stable position)
+% Target end-effector position in NED
 phi_0 = eta(4, 1);
 theta_0 = eta(5, 1);
 psi_0 = eta(6, 1);
@@ -98,9 +97,9 @@ for i = 1:N
     T_n_b(:,:,i) = T_n_s(:,:,i) * T_s_b;
 
     % Extract rotation (NED to robot base) and position
-    R_nb = T_n_b(1:3, 1:3, i);  % Rotation from base to NED
-    R_bn(:,:,i) = R_nb.';        % Rotation from NED to base
-    p_b_n(:, i) = T_n_b(1:3, 4, i);  % Robot base origin in NED
+    R_nb = T_n_b(1:3, 1:3, i);
+    R_bn(:,:,i) = R_nb.';
+    p_b_n(:, i) = T_n_b(1:3, 4, i);
 
     %% MOTION COMPENSATION
     % Counteract ship orientation to keep end-effector aligned with NED
@@ -164,18 +163,18 @@ for i = 1:N
     R_en(:,:,i) = R_ne.';
 end
 
-% Compute end-effector position error (deviation from target)
+% Compute end-effector position error
 p_e_error = p_e_n - repmat(p_e_n_target, 1, N);
 p_e_error_norm = vecnorm(p_e_error);
 
-%% Extract Euler angles for plotting
+%% Extract Euler angles
 phi_deg = rad2deg(eta(4, :));
 theta_deg = rad2deg(eta(5, :));
 psi_deg = rad2deg(eta(6, :));
 
 %% Plotting - Create tabbed figure interface
 
-% Create main figure window with tabs
+% Create main figure window 
 main_fig = figure('Name', 'MCE Platform Simulation with Manipulator', ...
                   'Position', [50 50 1400 900], ...
                   'NumberTitle', 'off');
@@ -322,7 +321,7 @@ title(sprintf('RMS Error: %.2f mm', rms(p_e_error_norm)*1000));
 
 %% Tabs 5-9: Coordinate Frames at Different Time Instants
 
-% Select time instants to visualize
+% Visualize time instants
 time_indices = round(linspace(1, N, 5));
 frame_scale = 8;  % Length of frame axes [m]
 time_labels = {'Start', '25%', '50%', '75%', 'End'};
@@ -514,7 +513,7 @@ fprintf('Standard deviation: [%.2e, %.2e, %.2e] m\n', std(p_b_s_check, 0, 2));
 %% Helper Functions
 
 function R = Rzyx(phi, theta, psi)
-    % RZYX Create rotation matrix from ZYX Euler angles (roll-pitch-yaw)
+    % RZYX Create rotation matrix from Euler angles
     % Rotation from NED frame to body frame
     % Input: phi (roll), theta (pitch), psi (yaw) in radians
     % Output: R = Rz(psi) * Ry(theta) * Rx(phi)
